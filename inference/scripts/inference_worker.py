@@ -67,6 +67,14 @@ def _snapshot_gallery(saved_dir, job_dir):
     return gallery
 
 
+def _report_progress(phase, completed=None, total=None):
+    event = {"phase": phase, "completed": completed, "total": total}
+    # Native tqdm writes unterminated stderr lines into the same pipe. Keep each
+    # small progress record on its own line in one atomic pipe write.
+    record = "\nSEETHROUGH_PROGRESS " + json.dumps(event, separators=(",", ":")) + "\n"
+    os.write(sys.stdout.fileno(), record.encode("utf-8"))
+
+
 def _run_request(job_dir):
     with (job_dir / "request.json").open(encoding="utf-8") as stream:
         request = json.load(stream)
@@ -80,6 +88,7 @@ def _run_request(job_dir):
     sys.path.insert(0, str(root / "common"))
     sys.path.insert(0, str(script_dir))
 
+    _report_progress("loading_layerdiff")
     import torch
     from inference_psd_quantized import (
         build_layerdiff_pipeline,
@@ -105,19 +114,21 @@ def _run_request(job_dir):
     steps = int(request["steps"])
     resolution = int(request["resolution"])
 
-    print("SEETHROUGH_STAGE layerdiff", flush=True)
     seed_everything(seed)
     layerdiff_pipe = build_layerdiff_pipeline(args)
-    run_layerdiff(layerdiff_pipe, str(input_path), str(job_dir), seed, steps, resolution)
+    run_layerdiff(
+        layerdiff_pipe, str(input_path), str(job_dir), seed, steps, resolution,
+        progress_callback=_report_progress)
     del layerdiff_pipe
     gc.collect()
     torch.cuda.empty_cache()
 
-    print("SEETHROUGH_STAGE depth", flush=True)
+    _report_progress("loading_depth")
     marigold_pipe = build_marigold_pipeline(args)
     run_marigold(
         marigold_pipe, str(input_path), str(job_dir), seed,
         resolution_depth=request["depth_resolution"],
+        progress_callback=_report_progress,
     )
     del marigold_pipe
     gc.collect()
@@ -125,7 +136,7 @@ def _run_request(job_dir):
 
     saved_dir = job_dir / "input"
     gallery = _snapshot_gallery(saved_dir, job_dir)
-    print("SEETHROUGH_STAGE psd", flush=True)
+    _report_progress("psd")
     further_extr(
         str(saved_dir), rotate=False, save_to_psd=True,
         tblr_split=request["tblr_split"],

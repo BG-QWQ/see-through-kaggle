@@ -119,9 +119,10 @@ def build_layerdiff_pipeline(args):
 class _MixedDtypeMarigoldPipeline(MarigoldDepthPipeline):
     """Bridge fp32 VAE conditioning to the UNet's compute precision."""
 
-    def single_infer(self, cond_latent, num_inference_steps, generator):
+    def single_infer(self, cond_latent, num_inference_steps, generator, step_callback=None):
         return super().single_infer(
-            cond_latent.to(dtype=self.unet.dtype), num_inference_steps, generator)
+            cond_latent.to(dtype=self.unet.dtype), num_inference_steps, generator,
+            step_callback=step_callback)
 
 
 def build_marigold_pipeline(args):
@@ -168,8 +169,23 @@ def build_marigold_pipeline(args):
     return marigold_pipe
 
 
-def run_layerdiff(pipeline, imgp, save_dir, seed, num_inference_steps, resolution):
+def _sampling_progress(progress_callback, phase):
+    if progress_callback is None:
+        return None
+    decode_phase = phase + '_decode'
+
+    def report(completed, total):
+        progress_callback(phase, completed, total)
+        if completed == total:
+            progress_callback(decode_phase, None, None)
+
+    return report
+
+
+def run_layerdiff(pipeline, imgp, save_dir, seed, num_inference_steps, resolution, progress_callback=None):
     """Run LayerDiff3D body + head passes. Replicates inference_utils.py v3 logic exactly."""
+    if progress_callback is not None:
+        progress_callback('body_prepare', None, None)
     saved = osp.join(save_dir, osp.splitext(osp.basename(imgp))[0])
     os.makedirs(saved, exist_ok=True)
     input_img = np.array(Image.open(imgp).convert('RGBA'))
@@ -190,7 +206,8 @@ def run_layerdiff(pipeline, imgp, save_dir, seed, num_inference_steps, resolutio
         prompt=body_tag_list,
         negative_prompt='',
         fullpage=fullpage,
-        group_index=0
+        group_index=0,
+        step_callback=_sampling_progress(progress_callback, 'body'),
     )
     images = pipeline_output.images
     for rst, tag in zip(pipeline_output.images, body_tag_list):
@@ -198,6 +215,8 @@ def run_layerdiff(pipeline, imgp, save_dir, seed, num_inference_steps, resolutio
     head_img = images[2]
 
     # Head crop
+    if progress_callback is not None:
+        progress_callback('head_prepare', None, None)
     head_tag_list = ['headwear', 'face', 'irides', 'eyebrow', 'eyewhite', 'eyelash', 'eyewear', 'ears', 'earwear', 'nose', 'mouth']
     hx0, hy0, hw, hh = cv2.boundingRect(cv2.findNonZero((head_img[..., -1] > 15).astype(np.uint8)))
 
@@ -240,7 +259,8 @@ def run_layerdiff(pipeline, imgp, save_dir, seed, num_inference_steps, resolutio
         prompt=head_tag_list,
         negative_prompt='',
         fullpage=input_head,
-        group_index=1
+        group_index=1,
+        step_callback=_sampling_progress(progress_callback, 'head'),
     )
     canvas = np.zeros((resolution, resolution, 4), dtype=np.uint8)
 
@@ -255,13 +275,15 @@ def run_layerdiff(pipeline, imgp, save_dir, seed, num_inference_steps, resolutio
         Image.fromarray(full).save(osp.join(saved, f'{tag}.png'))
 
 
-def run_marigold(marigold_pipe, srcp, save_dir, seed, resolution_depth):
+def run_marigold(marigold_pipe, srcp, save_dir, seed, resolution_depth, progress_callback=None):
     """Run Marigold depth estimation. Matches inference_utils.apply_marigold logic.
 
     Uses resolution_depth to control Marigold inference resolution. If different from
     source image size, images are resized before depth prediction and depth maps are
     resized back after. All frames processed together (no chunking).
     """
+    if progress_callback is not None:
+        progress_callback('depth_prepare', None, None)
     srcname = osp.basename(osp.splitext(srcp)[0])
     saved = osp.join(save_dir, srcname)
 
@@ -322,7 +344,9 @@ def run_marigold(marigold_pipe, srcp, save_dir, seed, resolution_depth):
         img_list_input = [smart_resize(img, resolution_depth) for img in img_list]
 
     seed_everything(seed)
-    pipe_out = marigold_pipe(color_map=None, img_list=img_list_input)
+    pipe_out = marigold_pipe(
+        color_map=None, img_list=img_list_input,
+        step_callback=_sampling_progress(progress_callback, 'depth'))
     depth_pred = pipe_out.depth_tensor
     depth_pred = depth_pred.to(device='cpu', dtype=torch.float32).numpy()
 

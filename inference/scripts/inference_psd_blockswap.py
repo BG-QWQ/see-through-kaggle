@@ -1,4 +1,4 @@
-from typing import Union, List, Optional
+from typing import Callable, Union, List, Optional
 import os.path as osp
 import argparse
 import sys
@@ -181,7 +181,8 @@ class KDiffusionStableDiffusionXLPipelineBlockSwap(KDiffusionStableDiffusionXLPi
             negative_prompt=None,
             show_progress=True,
             fullpage=None,
-            group_index=None
+            group_index=None,
+            step_callback: Optional[Callable[[int, int], None]] = None,
     ):
         # Determine execution device
         device = self.blockswap_device if self.blockswap_enabled else self.unet.device
@@ -281,6 +282,9 @@ class KDiffusionStableDiffusionXLPipelineBlockSwap(KDiffusionStableDiffusionXLPi
 
         latents = noise * self.scheduler.init_noise_sigma
 
+        if step_callback is not None:
+            step_callback(0, len(timesteps))
+
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
 
@@ -337,6 +341,9 @@ class KDiffusionStableDiffusionXLPipelineBlockSwap(KDiffusionStableDiffusionXLPi
                 latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
                 if latents.dtype != latents_dtype:
                     latents = latents.to(latents_dtype)
+
+                if step_callback is not None:
+                    step_callback(i + 1, len(timesteps))
 
                 if i == len(timesteps) - 1 or (i + 1) % self.scheduler.order == 0:
                     progress_bar.update()

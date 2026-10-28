@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Union, List, Optional
+from typing import Callable, Union, List, Optional
 import gc
 
 import numpy as np
@@ -343,7 +343,8 @@ class KDiffusionStableDiffusionXLPipeline(StableDiffusionXLImg2ImgPipeline):
             negative_prompt=None,
             show_progress=True,
             fullpage=None,
-            group_index=None
+            group_index=None,
+            step_callback: Optional[Callable[[int, int], None]] = None,
     ):
 
         device = self.unet.device
@@ -428,6 +429,10 @@ class KDiffusionStableDiffusionXLPipeline(StableDiffusionXLImg2ImgPipeline):
 
         latents = noise * self.scheduler.init_noise_sigma
 
+        # Report scheduler steps without inspecting or synchronizing device tensors.
+        if step_callback is not None:
+            step_callback(0, len(timesteps))
+
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
 
@@ -464,6 +469,9 @@ class KDiffusionStableDiffusionXLPipeline(StableDiffusionXLImg2ImgPipeline):
                     if torch.backends.mps.is_available():
                         # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
                         latents = latents.to(latents_dtype)
+
+                if step_callback is not None:
+                    step_callback(i + 1, len(timesteps))
 
                 if i == len(timesteps) - 1 or (i + 1) % self.scheduler.order == 0:
                     progress_bar.update()

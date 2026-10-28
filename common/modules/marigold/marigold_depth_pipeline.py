@@ -45,7 +45,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms.functional import pil_to_tensor, resize
 from transformers import CLIPTextModel, CLIPTokenizer
-from typing import Dict, Optional, Union
+from typing import Callable, Dict, Optional, Union
 
 from modules.layerdiffuse.layerdiff3d import UNetFrameConditionModel
 from .util.batchsize import find_batch_size
@@ -260,6 +260,7 @@ class MarigoldDepthPipeline(DiffusionPipeline):
         color_map: str = "Spectral",
         ensemble_kwargs: Dict = None,
         img_list=None,
+        step_callback: Optional[Callable[[int, int], None]] = None,
         **kwargs
     ) -> MarigoldDepthOutput:
         """
@@ -297,6 +298,9 @@ class MarigoldDepthPipeline(DiffusionPipeline):
                 near plane will be fixed at 0m.
             ensemble_kwargs (`dict`, *optional*, defaults to `None`):
                 Arguments for detailed ensembling settings.
+            step_callback (`Callable[[int, int], None]`, *optional*):
+                Receives CPU integer counts at sampling entry and after each scheduler step.
+                Counts cover all inference batches; decoding is not included.
         Returns:
             `MarigoldDepthOutput`: Output class for Marigold monocular depth prediction pipeline, including:
             - **depth_np** (`np.ndarray`) Predicted depth map with depth values in the range of [0, 1]
@@ -392,8 +396,15 @@ class MarigoldDepthPipeline(DiffusionPipeline):
         # Predict depth maps (batched)
         target_pred_ls = []
 
+        batch_step_callback = step_callback
+        if step_callback is not None and not is_3d:
+            batch_count = len(single_rgb_loader)
+
+            def batch_step_callback(completed, total):
+                step_callback(batch_index * total + completed, batch_count * total)
+
         iterable = single_rgb_loader
-        for batch in iterable:
+        for batch_index, batch in enumerate(iterable):
             if not is_3d:
                 (batched_img,) = batch
             else:
@@ -402,6 +413,7 @@ class MarigoldDepthPipeline(DiffusionPipeline):
                 cond_latent=batched_img,
                 num_inference_steps=denoising_steps,
                 generator=generator,
+                step_callback=batch_step_callback,
             )
             target_pred_ls.append(target_pred_raw.detach())
         target_preds = torch.concat(target_pred_ls, dim=0)
@@ -538,6 +550,7 @@ class MarigoldDepthPipeline(DiffusionPipeline):
         cond_latent: torch.Tensor,
         num_inference_steps: int,
         generator: Union[torch.Generator, None],
+        step_callback: Optional[Callable[[int, int], None]] = None,
     ) -> torch.Tensor:
         """
         Perform a single prediction without ensembling.
@@ -549,6 +562,8 @@ class MarigoldDepthPipeline(DiffusionPipeline):
                 Number of diffusion denoisign steps (DDIM) during inference.
             generator (`torch.Generator`)
                 Random generator for initial noise generation.
+            step_callback (`Callable[[int, int], None]`, *optional*):
+                Receives (0, timestep count) at sampling entry, then each completed scheduler step.
         Returns:
             `torch.Tensor`: Predicted targets.
         """
@@ -583,6 +598,9 @@ class MarigoldDepthPipeline(DiffusionPipeline):
         iterable = enumerate(timesteps)
 
         batch_empty_text_embed = batch_empty_text_embed.to(device=target_latent.device, dtype=target_latent.dtype)
+        if step_callback is not None:
+            step_callback(0, len(timesteps))
+
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in iterable:
                 unet_input = torch.cat(
@@ -604,6 +622,8 @@ class MarigoldDepthPipeline(DiffusionPipeline):
                 target_latent = self.scheduler.step(
                     noise_pred, t, target_latent, generator=generator
                 ).prev_sample
+                if step_callback is not None:
+                    step_callback(i + 1, len(timesteps))
                 progress_bar.update()
 
         if is_3d:

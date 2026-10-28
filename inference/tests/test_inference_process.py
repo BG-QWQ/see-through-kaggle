@@ -27,12 +27,15 @@ class InferenceProcessTests(unittest.IsolatedAsyncioTestCase):
             "import argparse, os, signal, sys, time\n"
             "from pathlib import Path\n"
             f"sys.path.insert(0, {str(SCRIPTS)!r})\n"
-            "from inference_worker import _watch_parent\n"
+            "from inference_worker import _watch_parent, _report_progress\n"
             "parser=argparse.ArgumentParser();parser.add_argument('job_dir');parser.add_argument('--parent-pid',type=int);args=parser.parse_args()\n"
             "_watch_parent(args.parent_pid)\n"
             "job=Path(args.job_dir)\n"
             "if (job/'ignore-term').exists(): signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
             "(job/'started').write_text(str(os.getpid()))\n"
+            "if (job/'progress').exists():\n"
+            "    sys.stderr.write('\\rnative progress without newline');sys.stderr.flush()\n"
+            "    _report_progress('body',1,4)\n"
             "if (job/'crash').exists(): os.kill(os.getpid(),signal.SIGKILL)\n"
             "while not (job/'release').exists(): time.sleep(0.01)\n"
         )
@@ -188,6 +191,27 @@ class InferenceProcessTests(unittest.IsolatedAsyncioTestCase):
         finally:
             self.runner.close()
             await drain
+
+    async def test_progress_arrives_before_exit_with_partial_native_stderr(self):
+        folder = self.job("progress")
+        (folder / "progress").touch()
+        intermediate = asyncio.Event()
+
+        def observe(event):
+            if event["phase"] == "body" and 0 < event["completed"] < event["total"]:
+                intermediate.set()
+
+        task = asyncio.create_task(self.runner.run(folder, on_progress=observe))
+        pid = None
+        try:
+            pid = await self.started(folder)
+            await asyncio.wait_for(intermediate.wait(), timeout=5)
+            self.assertFalse(task.done(), "Progress must arrive while inference is still running")
+        finally:
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assert_reaped(pid)
 
 
 if __name__ == "__main__":

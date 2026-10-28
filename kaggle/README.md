@@ -40,6 +40,13 @@
 
 Web 父进程仅负责队列、结果缓存与轻量监督；每个请求启动全新解释器，在 GPU0 分阶段加载 LayerDiff 与 Marigold，完成、报错或超时后退出，不跨请求缓存管线。请求串行执行。该隔离用于避免旧长驻推理进程的宿主空闲堆／异常张量污染下一请求，不降低单次请求的 CPU／GPU 峰值，也不修复 PSD alpha／预览毛边。连续请求及故障恢复已完成真实 T4 的有限序列验收，范围与原始证据见[验证记录](VALIDATION.md)，不代表任意输入或无限期服务保证。
 
+### Web 进度显示
+
+身体采样、头部采样和 Marigold 深度采样分别显示真实的 `已完成步数 / 当前阶段总步数`，由每次 scheduler step 完成后回传，不按耗时推算。切换阶段时百分比会重新开始；它不是整次请求的总耗时百分比。加载模型、输入准备、解码／保存和 PSD 组装显示阶段文字，不伪造可量化进度。单个采样步内部没有更细的进度，较高分辨率下仍可能较久才更新一次。
+
+真实公网浏览器更新、PSD 基线一致性及验收范围见[验证记录](VALIDATION.md)。已有服务不会热更新：请等当前请求结束后重新拉取代码并重启 Web；仅刷新浏览器不会替换服务端 Python 进程。
+
+
 ## 依赖隔离
 
 不要把 `requirements-kaggle.txt` 安装到 Kaggle 基础 kernel。预装的 bigframes、dopamine-rl、moviepy 等不属于推理依赖；修补它们的版本会扩大冲突面。Cell 4 创建不继承系统包的 venv，通过基础解释器的 `pip --python` 管理目标环境；批处理、PSD 验收和 Web 服务都使用 `runtime_python`。基础 kernel 只负责 GPU 枚举、调度与 notebook 展示。
@@ -72,7 +79,7 @@ STEPS = 30
 - [`inference/scripts/inference_process.py`](../inference/scripts/inference_process.py)：轻量请求进程监督、超时与停止管理。
 - [`inference/scripts/inference_worker.py`](../inference/scripts/inference_worker.py)：每请求独立解释器入口，复用现有推理 API 并输出 PSD/gallery。
 
-推理代码只修改一个上游文件：[`inference_psd_quantized.py`](../inference/scripts/inference_psd_quantized.py)，加入 `--dtype`、组件 dtype 选择、stats dtype 和局部 Marigold 混合精度边界。默认 `bf16` 不变；已有 blockswap 调用不提供 dtype 字段时仍沿用 bf16。根 README 另加一节入口链接（纯文档，不属于推理 patch）。没有修改 `common/`、`inference_psd.py`、`inference_psd_blockswap.py` 或 annotators。
+上游推理修改集中在 [`inference_psd_quantized.py`](../inference/scripts/inference_psd_quantized.py) 的 dtype／混合精度边界与可选进度回调，以及 [`common/modules/layerdiffuse/diffusers_kdiffusion_sdxl.py`](../common/modules/layerdiffuse/diffusers_kdiffusion_sdxl.py)、[`common/modules/marigold/marigold_depth_pipeline.py`](../common/modules/marigold/marigold_depth_pipeline.py) 的采样步观察回调；[`inference_psd_blockswap.py`](../inference/scripts/inference_psd_blockswap.py) 的对应入口同步接受可选回调。回调只传 CPU 整数，不读取张量或主动同步 CUDA；未提供回调时维持原调用方式。默认 `bf16` 不变；已有 blockswap 调用不提供 dtype 字段时仍沿用 bf16。没有修改 `inference_psd.py` 或 annotators。
 
 **混合精度边界不能省略**：LayerDiff 已在 VAE 编码后把 conditioning 转回 UNet dtype；当前 Marigold 原实现没有这样做。fp32 VAE conditioning 与 fp16 latent 拼接会提升到 fp32，导致 fp16 UNet 报 dtype mismatch。本集成在同一推理文件内用 `_MixedDtypeMarigoldPipeline.single_infer()` 做一次入口转换；bf16/同 dtype 仍使用原类。此边界已通过 CPU 真实小型模型验证，以及 Kaggle T4×2 完整分层、深度与 PSD 导出验收。
 
@@ -88,19 +95,20 @@ STEPS = 30
  git pull upstream main
 ```
 
-新文件通常不与上游冲突；推理冲突面只有 `inference_psd_quantized.py`，根 README 的入口节也可能遇到文档冲突。冲突时保留上游逻辑和本集成 dtype 相关行，不要用整文件覆盖上游版本。上游未来若新增同名集成文件，也应逐项合并。
+新文件通常不与上游冲突；推理冲突面为上列 dtype 与采样回调文件，根 README 的入口节也可能遇到文档冲突。冲突时保留上游逻辑，逐项合并 dtype 边界与可选回调，不要用整文件覆盖上游版本。上游未来若新增同名集成文件，也应逐项合并。
 
 ## 每次同步检查清单
 
 - [ ] `inference_psd_quantized.py` 的 `REPO_MAP['none']` 模型 ID 是否改变？同步 `inference_worker.py` 的模型参数。notebook 不硬编码模型 ID。Marigold 旧地址目前会重定向到 `layerdifforg/seethroughv0.0.1_marigold`，未来若失效需同步 worker。
 - [ ] `build_layerdiff_pipeline` / `build_marigold_pipeline` / `run_layerdiff` / `run_marigold` / `further_extr` 签名是否改变？同步 worker 调用。Marigold `single_infer` 签名或内部 dtype 边界改变时，检查局部子类是否仍必要、是否仍正确。
+- [ ] LayerDiff／Marigold 的 scheduler loop 或 blockswap override 是否改变？进度必须在真实 step 完成后发出，保留可选 `step_callback` 接口；worker 结构化消息必须与未换行的原生 stderr 进度条正确分帧，不能退回静态三阶段百分比。
 - [ ] 保留非 bf16 模式的按组件 dtype 加载；不要把 pipeline 整体先转 fp16 再把 VAE 转回 fp32，这会丢失 VAE 权重精度，也不能降低首次 fp32 加载的共享内存峰值。
 - [ ] [官方 Space app.py](https://huggingface.co/spaces/24yearsold/see-through-demo/blob/main/app.py) 是否有值得复用的 UI 改进？[Space README](https://huggingface.co/spaces/24yearsold/see-through-demo/blob/main/README.md) 的 `sdk_version` 是否改变？同步 `requirements-kaggle.txt` 的 Gradio pin；当前为 `6.12.0`。
 - [ ] 根 `requirements.txt` 的 transformers / diffusers / accelerate 等 pin 是否更新？同步精简依赖，避免引入 Qt、annotators 或训练包。
-- [ ] 运行 `python -m py_compile inference/scripts/inference_psd_quantized.py inference/scripts/app_gradio.py inference/scripts/inference_worker.py inference/scripts/inference_process.py`，在装好精简依赖后实际运行推理 CLI `--help` 和本地 Gradio 页面。
+- [ ] 对上列推理文件和三个 Web／worker 文件运行 `python -m py_compile`，在装好精简依赖后实际运行推理 CLI `--help` 和本地 Gradio 页面。
 - [ ] 运行 `python -m unittest discover -s inference/tests -v` 检查 OS 进程生命周期；它不需要模型依赖，不替代真实 GPU 推理或公网验收。
 - [ ] 设 `RUN_BATCH=True`、`ENABLE_WEBUI=False` 后，在 Kaggle 重新运行 Cell 1–7；Cell 6 验收每图 PSD 分层、stats dtype/显存/耗时、非透明/非黑分解图；Cell 7 验收归档包含每张图的 PSD。正常日志应有 `LayerDiff3D done`、`Marigold done`、`PSD assembly done`。
-- [ ] 从非 Kaggle 浏览器访问两种隧道之一，上传测试图，确认 gallery 非空并能下载分层 PSD。更换 Gradio pin 时也检查 gallery 与 PSD 在临时目录清理后仍可读取。
+- [ ] 从非 Kaggle 浏览器访问两种隧道之一，上传测试图，确认身体／头部／深度步数在推理返回前更新，gallery 非空且能下载分层 PSD。更换 Gradio pin 时也检查 gallery 与 PSD 在临时目录清理后仍可读取。
 - [ ] 新架构实际验收连续 1536／2048 请求、CUDA OOM 后新 worker 降分辨率恢复、输出缓存仍可下载、请求超时、SIGUSR1 排空、SIGTERM 停止及父进程强杀后无孤儿 GPU worker；记录资源与退出结果，不能把启动成功算作 GPU 稳定性通过。
 
 ## 回退与平台限制

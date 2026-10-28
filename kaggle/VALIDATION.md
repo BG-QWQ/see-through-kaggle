@@ -287,3 +287,40 @@ GitHub 更新不会替换已导入 Kaggle 的单元。需重新导入更新后�
 本地 macOS 的完整流程探针曾遇到非本机 `/kaggle/working` 缓存路径及新缓存缺少 frpc 下载文件，未计为成功；远端 CPU 专项使用可写缓存并完成了真实公网访问。静态 Kaggle logs 接口在运行中仅返回换行，原生实时流才提供执行阶段；日志采集端的读取超时不等同服务退出。cloudflared 与正式 fp32 回退仍未完成端到端验收。
 
 原始附件位于 [`workspace/kaggle-public-link-20261028T073158Z`](../workspace/kaggle-public-link-20261028T073158Z)：[根因与验证结论](../workspace/kaggle-public-link-20261028T073158Z/public-link-diagnosis.json)、[用户实际运行日志](../workspace/kaggle-public-link-20261028T073158Z/native-live-log-probe.txt)、[远端完整收尾日志](../workspace/kaggle-public-link-20261028T073158Z/cpu-startup-finished.log)、[远端结果 JSON](../workspace/kaggle-public-link-20261028T073158Z/remote-output/public-startup-result.json)、[实际公网页面截图](../workspace/kaggle-public-link-20261028T073158Z/remote-public-ui.png) 与 `cpu-submission/` 可重放 notebook。测试公网链接已随正常关闭失效，不作为常驻服务入口。
+
+## 2026-10-28：Gradio 真实采样步进度
+
+### 根因与修复
+
+旧 UI 的 `0/3` 统计 LayerDiff、深度和 PSD 三个大阶段，而不是采样步。LayerDiff 内部还包含身体与头部两次采样，因此推理正常时也会长时间显示 `0/3`。原生日志能看到采样进展，不代表这些步数已经传给 Gradio。
+
+LayerDiff 与 Marigold 的 scheduler loop 新增可选 CPU 整数回调；runner 区分身体、头部和深度阶段，独立 worker 通过结构化 stdout 消息实时回传。UI 按当前阶段显示真实步数；加载模型、准备输入、解码／保存和 PSD 组装显示阶段文字，不用计时器估算百分比。没有读取进度张量或主动同步 CUDA，不改变模型计算、dtype、seed、offload 或 PSD 算法。
+
+还复现了合并 stdout／stderr 时的分帧问题：原生 tqdm 的未换行文本会与进度 JSON 粘连，使监督进程忽略更新。worker 现在将小型进度记录加前后换行，并以单次原子 pipe write 发出。新增的真实 OS 进程回归在修复前等待中间进度超时，修复后通过；覆盖的是推理退出前的消息送达，不是假模型输出测试。
+
+### 实际验收
+
+在 私有 Kaggle 验证 notebook（version 2） 使用 Tesla T4 GPU0、torch `2.8.0+cu128`、CUDA 12.8、Gradio `6.12.0`，从非 Kaggle Ego 浏览器实际上传 `common/assets/test_image.png`，点击 Run **一次**。参数为 512 / LayerDiff 10 steps / seed 42 / 不拆左右；深度仍使用原有 4-step preset、768 分辨率。专项直接启动 app，未改变生产 notebook 的 `WEB_MAX_RESOLUTION=2048`。
+
+| 采样阶段 | worker 完整回传 | 浏览器实际观察 | 视觉证据 |
+| --- | --- | --- | --- |
+| 身体 | 0–10 / 10，11 条 | 0–9 / 10；截图为 60% | [身体进度](../workspace/kaggle-progress-20261028T090221Z/browser-body-progress.png) |
+| 头部 | 0–10 / 10，11 条 | 0–9 / 10；截图为 10% | [头部进度](../workspace/kaggle-progress-20261028T090221Z/browser-head-progress.png) |
+| 深度 | 0–4 / 4，5 条 | 0–3 / 4；截图为 25% | [深度进度](../workspace/kaggle-progress-20261028T090221Z/browser-depth-progress.png) |
+
+三种采样的中间更新均早于结果返回。Gradio 会合并紧邻的最终步／解码阶段更新，不保证每个百分比都单独渲染；阶段切换会重置当前阶段百分比，它不是整次请求的总耗时比例。单个采样步内部仍没有更细进度。
+
+从请求进入到产生输出约 **265.7 秒**；gallery 24 项。通过真实浏览器下载并在本机独立解析 **512×512、18 个像素图层**的 PSD：二进制 SHA256 为 `410628fed43efe18607ac663deca5cb1f00b02a78ebd6c794addd4a160728440`，图层 RGBA／名称／位置／可见性指纹为 `285ba2a80ef2a98a1ca30e5e5079d5311272ef2dc0022c2d5fc292551072602e`，均与此前相同参数的 request-isolation 基线完全一致；远端保存的 PSD 也逐字节一致。
+
+远端校验冻结 manifest 中的全部 99 个文件；8 个本轮修改的推理／Web／测试文件均与实际运行源码哈希一致。本地 11 个 Python 文件语法检查通过，7 项 OS 进程回归全部通过，包括取消、排队取消、超时强制回收、SIGKILL 后新请求、父进程死亡、正常排空，以及未换行 stderr 下的实时进度送达。此次 CPU 回归不替代 GPU 推理证明。
+
+完成后保留公网下载端点 120 秒，再正常关闭，服务返回码 0，Kaggle 最终 `COMPLETE`；浏览器测试空间已关闭。没有停止或重启用户正在运行的 notebook。
+
+### 范围与原始证据
+
+本次只验证一个 512 请求的真实进度与输出不变性，没有重跑 1536／2048 稳定性或质量矩阵，也没有新增 cloudflared／完整 fp32 回退保证。首次 version 1 因 Kaggle 自动展开上传的 zip 而在测试 bootstrap 停止，未进入任何推理；version 2 改为校验展开后的 manifest 与逐文件哈希。日志采集曾遇到 SSL record-layer failure，只重连日志，没有重复提交模型请求。
+
+- [结论、参数、源码哈希与测试边界](../workspace/kaggle-progress-20261028T090221Z/progress-diagnosis.json)
+- [远端最终 verdict](../workspace/kaggle-progress-20261028T090221Z/remote-output/progress-verification/verdict.json)、[真实 worker 事件](../workspace/kaggle-progress-20261028T090221Z/remote-output/progress-verification/events.jsonl) 与同目录源码／模型 attestations、资源采样和服务日志
+- [浏览器实际步数记录](../workspace/kaggle-progress-20261028T090221Z/browser-progress.json)、[完成界面](../workspace/kaggle-progress-20261028T090221Z/browser-completed.png) 与[浏览器下载 PSD 的独立复核](../workspace/kaggle-progress-20261028T090221Z/browser-output-validation.json)
+- [自包含验证 notebook](../workspace/kaggle-progress-20261028T090221Z/see_through_progress.ipynb) 与 [CLI metadata](../workspace/kaggle-progress-20261028T090221Z/kernel-metadata.json)；测试公网链接已随正常关闭失效。

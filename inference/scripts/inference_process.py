@@ -88,7 +88,7 @@ class InferenceProcess:
         if cancelled:
             raise asyncio.CancelledError
 
-    async def run(self, job_dir, on_stage=None):
+    async def run(self, job_dir, on_progress=None):
         await self._job_lock.acquire()
         process = reader = None
         try:
@@ -132,8 +132,8 @@ class InferenceProcess:
                     if line is None:
                         break
                     print(f"[worker {process.pid}] {line}", end="", flush=True)
-                    if on_stage is not None and line.startswith("SEETHROUGH_STAGE "):
-                        on_stage(line.removeprefix("SEETHROUGH_STAGE ").strip())
+                    if on_progress is not None and line.startswith("SEETHROUGH_PROGRESS "):
+                        on_progress(json.loads(line.removeprefix("SEETHROUGH_PROGRESS ")))
                 code = await asyncio.to_thread(process.wait, timeout=max(0, deadline - time.monotonic()))
             except (TimeoutError, subprocess.TimeoutExpired):
                 raise TimeoutError(f"推理超过 {self.timeout:g} 秒时限；本次 worker 将被退出回收。") from None

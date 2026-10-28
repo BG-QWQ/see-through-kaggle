@@ -58,12 +58,28 @@ async def inference(image: Image.Image, resolution: int = 1024, seed: int = 42,
         raise gr.Error(f"Resolution must be between 64 and {MAX_RESOLUTION}; use 64-pixel steps.")
     seed, steps = int(seed), int(steps)
     _log(f"Resolution: {resolution}, Seed: {seed}, Image: {image.size}")
-    stage_progress = {"layerdiff": (0, "LayerDiff"), "depth": (1, "Marigold depth"), "psd": (2, "PSD assembly")}
+    phase_labels = {
+        "loading_layerdiff": "加载 LayerDiff 模型",
+        "body_prepare": "准备身体图层",
+        "body": "LayerDiff · 身体采样",
+        "body_decode": "解码并保存身体图层",
+        "head_prepare": "准备头部图层",
+        "head": "LayerDiff · 头部采样",
+        "head_decode": "解码并保存头部图层",
+        "loading_depth": "加载 Marigold 深度模型",
+        "depth_prepare": "准备深度输入",
+        "depth": "Marigold · 深度采样",
+        "depth_decode": "解码并保存深度图",
+        "psd": "组装 PSD",
+    }
 
-    def update_stage(stage):
-        if stage in stage_progress:
-            index, description = stage_progress[stage]
-            progress((index, 3), desc=description)
+    def update_progress(event):
+        phase = event["phase"]
+        description = phase_labels.get(phase, phase)
+        if event["total"] is None:
+            progress(None, desc=description)
+        else:
+            progress((event["completed"], event["total"]), desc=description)
 
     try:
         # Files outlive the child; only the parent may remove the job directory.
@@ -74,11 +90,11 @@ async def inference(image: Image.Image, resolution: int = 1024, seed: int = 42,
                 "dtype": DTYPE, "resolution": resolution, "seed": seed, "steps": steps,
                 "depth_resolution": DEPTH_RESOLUTION, "tblr_split": bool(tblr_split),
             }), encoding="utf-8")
-            progress((0, 3), desc="Starting isolated inference")
-            result = await _WORKER.run(job_dir, on_stage=update_stage)
+            progress(None, desc="启动独立推理进程")
+            result = await _WORKER.run(job_dir, on_progress=update_progress)
             output_path = _cache_file(job_dir, result["psd"])
             gallery = [(_cache_file(job_dir, item["path"]), item["label"]) for item in result["gallery"]]
-            progress((3, 3), desc="Complete")
+            progress(1.0, desc="完成")
             _log(f"Total inference time: {time.monotonic() - started:.1f}s")
             return output_path, gallery
     except asyncio.CancelledError:
