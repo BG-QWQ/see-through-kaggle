@@ -82,9 +82,9 @@
 - [最终诊断与证据索引](../workspace/kaggle-quality-controls-20261026T211949Z/final-diagnosis.json)
 - [完整流程原始矩阵](../workspace/kaggle-quality-controls-20261026T211949Z/runtime/quality_controls/matrix-results.json)
 - [精度与执行等价性逐图层分析](../workspace/kaggle-quality-controls-20261026T211949Z/head-precision-analysis/controlled-quality-analysis.json)
-- 完整流程：私有 Kaggle 验证 notebook（version 1）。本机 `submission/` 保存实际 notebook 与 metadata。
-- 原始 FP16 精度参考：私有 Kaggle 验证 notebook（version 3）。本机 `precision-two-chunk-submission/` 保存实际提交。
-- FP32 head／匹配 FP16 head：私有 Kaggle 验证 notebook（version 4／5）。本机分别为 `fp32-head-trim-reference-submission/`、`fp16-head-matched-reference-submission/`。
+- 完整流程：私有 Kaggle 质量控制验证 notebook，version 1。本机 `submission/` 保存实际 notebook 与 metadata。
+- 原始 FP16 精度参考：私有 Kaggle 精度对照 notebook，version 3。本机 `precision-two-chunk-submission/` 保存实际提交。
+- FP32 head／匹配 FP16 head：私有 Kaggle 头部精度参考 notebook，version 4／5。本机分别为 `fp32-head-trim-reference-submission/`、`fp16-head-matched-reference-submission/`。
 - [此前 CPU 原生堆与 PSD alpha 诊断](../workspace/kaggle-diagnostics-20261026T192040Z/diagnosis.json)。
 
 OOM、超时、权重缓存加载失败或仅部分迭代的尝试均不算有效质量结果。最终四个来源版本均已观察到 Kaggle `COMPLETE`；未产出日志／结果的额外补充 notebook 已删除，不纳入结论。
@@ -167,7 +167,7 @@ OOM、超时、权重缓存加载失败或仅部分迭代的尝试均不算有�
 
 ### 稳定性原始证据
 
-附件根目录：[`workspace/kaggle-service-stability-20261027T083238Z`](../workspace/kaggle-service-stability-20261027T083238Z)。远端为 私有 Kaggle 验证 notebook（version 1），提交超时参数为 32400 秒。大型附件与私有 notebook 的分发限制同前述质量验证。
+附件根目录：[`workspace/kaggle-service-stability-20261027T083238Z`](../workspace/kaggle-service-stability-20261027T083238Z)。远端为私有 Kaggle 服务稳定性验证 notebook，version 1，提交超时参数为 32400 秒。大型附件与私有 notebook 的分发限制同前述质量验证。
 
 - [稳定性诊断与逐请求结论](../workspace/kaggle-service-stability-20261027T083238Z/stability-diagnosis.json)
 - [试验方案与通过条件](../workspace/kaggle-service-stability-20261027T083238Z/protocol.json)
@@ -207,7 +207,7 @@ OOM、超时、权重缓存加载失败或仅部分迭代的尝试均不算有�
 
 ### 真实 GPU 结果：本轮有界验收通过
 
-远端 私有 Kaggle 验证 notebook（version 2） 使用私有源码 Dataset version 2。所有场景启动时核对了 app、supervisor、worker 与正式 runner 的 SHA256，权重 revision 与前述诊断一致。环境为隔离 Python 3.13、torch 2.8.0+cu128、CUDA 12.8、Gradio 6.12.0；本轮 `pip check` 通过。仍只用 GPU0、FP16 UNet/text、FP32 VAEs、Marigold 768。
+远端私有 Kaggle 请求隔离验证 notebook（version 2）使用私有源码 Dataset version 2。所有场景启动时核对了 app、supervisor、worker 与正式 runner 的 SHA256，权重 revision 与前述诊断一致。环境为隔离 Python 3.13、torch 2.8.0+cu128、CUDA 12.8、Gradio 6.12.0；本轮 `pip check` 通过。仍只用 GPU0、FP16 UNet/text、FP32 VAEs、Marigold 768。
 
 **19 个预定真实 HTTP 请求全部执行：13 个成功产物、6 个预期故障／停止、0 个非预期失败。** 主场景使用同一父 PID **364**，连续执行 14 个请求，存活约 6.30 小时；19 次请求分别使用新 worker。另四个场景才更换父进程，用于不同超时配置与关闭行为。没有测试替身或模型重试；Kaggle `COMPLETE` 不是通过依据。
 
@@ -266,7 +266,7 @@ OOM、超时、权重缓存加载失败或仅部分迭代的尝试均不算有�
 
 ### 根因与对照
 
-读取用户实际运行的 `已脱敏的 Kaggle notebook` 源码和原生日志后，确认其配置为 `ENABLE_WEBUI=True`、`TUNNEL='gradio'`，并非关闭了公网模式。约 235.5 秒的日志已进入 Cell 5：GPU0 分到 3 张测试图，GPU1 分到 2 张；采集到的日志尚无 Cell 8 启动记录。
+读取用户实际运行的 Kaggle notebook 源码和原生日志后，确认其配置为 `ENABLE_WEBUI=True`、`TUNNEL='gradio'`，并非关闭了公网模式。约 235.5 秒的日志已进入 Cell 5：GPU0 分到 3 张测试图，GPU1 分到 2 张；采集到的日志尚无 Cell 8 启动记录。
 
 当时的 `main`（`19547e1`）没有批处理总开关。Run All 必须先在 Cell 5 等待所有批处理 worker 退出，再执行 Cell 6 校验、Cell 7 打包，最后才在 Cell 8 创建公网链接。因此“开启 Web”不等于“马上启动 Web”，即使分享配置正确，也会先被五张图片的批处理阻塞。
 
@@ -276,7 +276,7 @@ OOM、超时、权重缓存加载失败或仅部分迭代的尝试均不算有�
 
 - 新增 `RUN_BATCH=False` 默认配置；Cell 5、6、7 分别受该开关控制。默认 Run All 完成依赖安装后直接进入 Web 启动；需要批处理时显式设为 True。`ENABLE_WEBUI` 继续独立控制 Web，不改模型、dtype 或进程隔离实现。
 - 全部 notebook 代码格编译通过；三个启用分支的 AST 与原批处理／校验／归档实现完全一致。本轮没有重新跑启用状态下的 GPU 批处理。
-- 在 私有 Kaggle 验证 notebook（version 1） 使用独立 CPU 实例、最小 Gradio 6.12.0 环境，执行修复后的真实 Cell 2、3、5–9。没有启动批处理 worker、生成批处理文件或发起模型推理。
+- 在私有 Kaggle 公网启动验证 notebook（version 1）使用独立 CPU 实例、最小 Gradio 6.12.0 环境，执行修复后的真实 Cell 2、3、5–9。没有启动批处理 worker、生成批处理文件或发起模型推理。
 - 专项测试约 53.8 秒生成 `gradio.live` 链接，已从本机 Ego 浏览器实际打开，看到完整上传／分辨率／Run 界面，起始分辨率 1024、上限 2048。该时间不包含正式路径的完整 CUDA PyTorch 依赖安装，不能当作用户 Run All 的总耗时保证。
 - 测试设置 180 秒保活，随后走产品默认 60 秒下载宽限，Web 返回码 0，Kaggle 最终 `COMPLETE`。推理核心四个文件 SHA256 与此前 GPU 验收完全相同；没有占用额外 GPU 任务，也未停止或重启用户正在运行的 notebook。
 
@@ -300,7 +300,7 @@ LayerDiff 与 Marigold 的 scheduler loop 新增可选 CPU 整数回调；runner
 
 ### 实际验收
 
-在 私有 Kaggle 验证 notebook（version 2） 使用 Tesla T4 GPU0、torch `2.8.0+cu128`、CUDA 12.8、Gradio `6.12.0`，从非 Kaggle Ego 浏览器实际上传 `common/assets/test_image.png`，点击 Run **一次**。参数为 512 / LayerDiff 10 steps / seed 42 / 不拆左右；深度仍使用原有 4-step preset、768 分辨率。专项直接启动 app，未改变生产 notebook 的 `WEB_MAX_RESOLUTION=2048`。
+在私有 Kaggle 进度验证 notebook（version 2）使用 Tesla T4 GPU0、torch `2.8.0+cu128`、CUDA 12.8、Gradio `6.12.0`，从非 Kaggle Ego 浏览器实际上传 `common/assets/test_image.png`，点击 Run **一次**。参数为 512 / LayerDiff 10 steps / seed 42 / 不拆左右；深度仍使用原有 4-step preset、768 分辨率。专项直接启动 app，未改变生产 notebook 的 `WEB_MAX_RESOLUTION=2048`。
 
 | 采样阶段 | worker 完整回传 | 浏览器实际观察 | 视觉证据 |
 | --- | --- | --- | --- |
@@ -329,7 +329,7 @@ LayerDiff 与 Marigold 的 scheduler loop 新增可选 CPU 整数回调；runner
 
 ### 现场证据与不能推断的结论
 
-用户报告网页显示 `Connection to the server was lost. Attempting reconnection...`，但 Kaggle 继续推理，并提供 Kaggle notebook（远端版本标识已脱敏）。本轮只读拉取该 notebook 的当前源码、采集当前 session 的原生日志；日志显示请求为 **2048 / 30 steps / seed 42**，输入尺寸 1024×1536，身体采样已推进到 **18/30**。同期从外部读取主域名 `/gradio_api/app_id` 得到 HTTP 502，真实 Ego 浏览器打开首页也显示 **502 Bad Gateway**。具体公网域名仅保存在本机证据，不在正文公开。
+用户报告网页显示 `Connection to the server was lost. Attempting reconnection...`，但 Kaggle 继续推理。本轮只读拉取该 notebook 的当前源码、采集当前 session 的原生日志；日志显示请求为 **2048 / 30 steps / seed 42**，输入尺寸 1024×1536，身体采样已推进到 **18/30**。同期从外部读取主域名 `/gradio_api/app_id` 得到 HTTP 502，真实 Ego 浏览器打开首页也显示 **502 Bad Gateway**。具体公网域名仅保存在本机证据，不在正文公开。
 
 这证明公网访问失败与计算继续可以同时发生，不能单凭断连判定显存不足、精度异常或某一个确定网络跳点。额外 CPU 验证中，Gradio 中继还出现 TCP `connection refused`，无法生成主分享链接；cloudflared 则能建立独立入口。这是另一次独立连接观测，不冒充用户原 session 的中继日志。没有停止、重启、重新提交用户任务，也没有读取或重新上传其图片。
 
@@ -347,7 +347,7 @@ Gradio 6.12 的该提示不能当作“原请求已经恢复”：前端会探�
 
 ### 实际验证
 
-成功场景为 私有 Kaggle 验证 notebook（version 3），**CPU 实例，不使用 GPU、不导入 torch、不运行模型**。正式 app、结果存储和进程监督源码原样运行；测试把模型 worker 替换为受控 OS 文件导出进程，导出上一轮真实 GPU 生成的 PSD，18 张 PNG 由该 PSD 的真实像素图层提取。Cell 8 仅替换测试 launcher，Cell 9 执行正式代码。此夹具验证的是传输、生命周期与持久化，不是新一次图像推理或质量验收。
+成功场景来自私有 Kaggle 断线恢复验证 notebook（version 3），**CPU 实例，不使用 GPU、不导入 torch、不运行模型**。正式 app、结果存储和进程监督源码原样运行；测试把模型 worker 替换为受控 OS 文件导出进程，导出上一轮真实 GPU 生成的 PSD，18 张 PNG 由该 PSD 的真实像素图层提取。Cell 8 仅替换测试 launcher，Cell 9 执行正式代码。此夹具验证的是传输、生命周期与持久化，不是新一次图像推理或质量验收。
 
 从非 Kaggle Ego 浏览器通过 cloudflared 实际上传公开测试图并点 Run 一次，取得 ID；随后对该测试页注入离线、恢复网络并整页重载。重载后自动从 URL 找回运行中的请求；离线前、离线时和重载后的 worker PID 均为 **145**，成功场景全程只启动 **1** 个受控 worker。释放导出进程后，再打开不含 ID 的新 URL，手动输入原 ID，点击 `Check status / retrieve saved result`，看到 18 项 gallery 并实际下载 PSD；没有再次点击 Run。
 
