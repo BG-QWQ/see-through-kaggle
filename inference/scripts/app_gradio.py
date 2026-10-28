@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import sys
 import tempfile
@@ -79,9 +80,14 @@ def _saved_outputs(request_id, record):
     )
 
 
-def recover_request(request_id):
+def recover_request(request_id: str) -> tuple:
+    request_id = (request_id or "").strip()
     if not request_id:
         return "Run creates a request ID before inference. Keep it to retrieve results after a disconnection.", None, []
+    if re.fullmatch(r"[0-9a-f]{1,31}", request_id):
+        return "Incomplete request ID. Enter all 32 lowercase hexadecimal characters; recovery does not start inference.", None, []
+    if re.fullmatch(r"[0-9a-f]{32}", request_id) is None:
+        return "Invalid request ID. Paste only the 32 lowercase hexadecimal characters, not a URL or other text.", None, []
     try:
         record = _JOBS.get(request_id)
     except ValueError as error:
@@ -136,7 +142,8 @@ def request_snapshot(request_id: str) -> dict:
     return snapshot
 
 
-def restore_request(request_id):
+def restore_request(request_id: str) -> tuple:
+    request_id = (request_id or "").strip()
     return request_id, *recover_request(request_id)
 
 
@@ -264,6 +271,7 @@ with gr.Blocks(title="See-through: Layer Decomposition", delete_cache=(3600, 360
     request_id.change(
         fn=None, inputs=[request_id], outputs=[], queue=False,
         js="""(id) => {
+            id = (id || "").trim();
             const params = new URLSearchParams(window.location.hash.slice(1));
             if (id) params.set("request", id); else params.delete("request");
             const hash = params.toString();
@@ -273,7 +281,8 @@ with gr.Blocks(title="See-through: Layer Decomposition", delete_cache=(3600, 360
     )
     demo.load(
         fn=restore_request, inputs=[request_id],
-        outputs=[request_id, request_status, psd_output, gallery_output], queue=False,
+        outputs=[request_id, request_status, psd_output, gallery_output],
+        queue=False,
         js="() => [new URLSearchParams(window.location.hash.slice(1)).get('request') || '']",
     )
     gr.Examples(

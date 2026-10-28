@@ -10,6 +10,7 @@ from utils.cv import center_square_pad_resize, img_alpha_blending, smart_resize,
 from utils.torch_utils import seed_everything
 from utils.io_utils import json2dict, dict2json, load_parts, save_tmp_img, load_part, save_psd
 from utils.torchcv import cluster_inpaint_part
+from utils.part_split import eyes_split, part_lr_split, tag_lr_split
 
 from psd_tools import PSDImage
 from safetensors.torch import load_file
@@ -324,19 +325,6 @@ def apply_marigold(srcp, pretrained: str, num_inference_steps=-1, seed=0, save_d
     Image.fromarray(blended).save(osp.join(saved, 'reconstruction.png'))
 
 
-def label_lr_split(labels, stats, id1, id2):
-    label1 = (labels == id1).astype(np.uint8) * 255
-    label2 = (labels == id2).astype(np.uint8) * 255
-
-    stats1, stats2 = stats[id1], stats[id2]
-
-    x1 = stats[id1][0] + stats[id1][2] / 2
-    x2 = stats[id2][0] + stats[id2][2] / 2
-
-    if x2 < x1:
-        return label2, label1, stats2, stats1
-    else:
-        return label1, label2, stats1, stats2
 
 
 def save_part(tag, saved, part_dict, crop=True, save_part_info=False, save_to_disk=True):
@@ -346,10 +334,13 @@ def save_part(tag, saved, part_dict, crop=True, save_part_info=False, save_to_di
 
     depth = part_dict.pop('depth')
     mask = img[..., -1] > 10
-    depth_median = np.median(depth[mask])
+    if 'depth_median' in part_dict:
+        depth_median = part_dict['depth_median']
+    else:
+        depth_median = np.median(depth[mask])
 
     if crop:
-        xywh = cv2.boundingRect(cv2.findNonZero(mask.astype(np.uint8)))
+        xywh = cv2.boundingRect(cv2.findNonZero((img[..., -1] > 0).astype(np.uint8)))
         xyxy = np.array(xywh).copy()
         xyxy[2] += xyxy[0]
         xyxy[3] += xyxy[1]
@@ -381,56 +372,6 @@ def save_part(tag, saved, part_dict, crop=True, save_part_info=False, save_to_di
     return part_dict
 
 
-def process_cuts(img, depth, src_xyxy, tgt_bbox, p=5, mask=None):
-    tx1, ty1, tx2, ty2 = tgt_bbox[:4]
-    tx2 += tx1
-    ty2 += ty1
-    img = img[ty1: ty2, tx1: tx2].copy()
-    depth = depth[ty1: ty2, tx1: tx2]
-    
-    depth_median = 1
-    if mask is not None:
-        mask = (mask[ty1: ty2, tx1: tx2].copy() > 15).astype(np.uint8)
-        ksize = 1
-        element = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * ksize + 1, 2 * ksize + 1),(ksize, ksize))
-        mask = cv2.dilate(mask, element)
-        img[..., -1] *= mask
-        depth = 1 - (1-depth) * mask
-        if np.any(mask):
-            depth_median = np.median(depth[mask > 0])
-    
-    fxyxy = [tx1 + src_xyxy[0], ty1 + src_xyxy[1], tx2 + src_xyxy[0], ty2 + src_xyxy[1]]
-
-    return img, depth, fxyxy, depth_median
-
-
-def part_lr_split(tag, part_info):
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-        part_info['mask'].astype(np.uint8) * 255, connectivity=8)
-    tag2pinfo = {}
-    if len(stats) > 2:
-        stats = np.array(stats)
-        stats_order = np.argsort(stats[..., -1])[::-1][1:]
-        arml_mask, armr_mask, statsl, statsr = label_lr_split(labels, stats, stats_order[0], stats_order[1])
-        depth_median = part_info.get('depth_median', 1)
-
-        img, depth, xyxy, depth_median = process_cuts(part_info['img'], part_info['depth'], part_info['xyxy'], statsl, mask=arml_mask)
-        arml_mask = arml_mask[xyxy[1]: xyxy[3], xyxy[0]: xyxy[2]]
-        tag2pinfo[f'{tag}-r'] = {'img': img, 'xyxy': xyxy, 'depth': depth, 'depth_median': depth_median, 'tag': f'{tag}-r'}
-
-        img, depth, xyxy, depth_median = process_cuts(part_info['img'], part_info['depth'], part_info['xyxy'], statsr, mask=armr_mask)
-        armr_mask = armr_mask[xyxy[1]: xyxy[3], xyxy[0]: xyxy[2]]
-        tag2pinfo[f'{tag}-l'] = {'img': img, 'xyxy': xyxy, 'depth': depth, 'depth_median': depth_median, 'tag': f'{tag}-l'}
-
-    else:
-        tag2pinfo[tag] = part_info
-    return tag2pinfo
-
-
-def tag_lr_split(tag: str, tag2pinfo):
-    if tag in tag2pinfo:
-        part_info = tag2pinfo.pop(tag)
-        tag2pinfo.update(part_lr_split(tag, part_info))
 
 
 def further_extr(srcd: str, rotate=True, save_to_psd=False, tblr_split=True):
@@ -447,30 +388,10 @@ def further_extr(srcd: str, rotate=True, save_to_psd=False, tblr_split=True):
     tag2pinfo = {}
     for pinfo in part_dict_list:
         tag = pinfo['tag']
-        tag2pinfo[tag] = pinfo
-
-    if 'eyes' in tag2pinfo:
-        part_info = tag2pinfo.pop('eyes')
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-            part_info['mask'].astype(np.uint8) * 255, connectivity=8)
-        if len(stats) > 2:
-            stats = np.array(stats)
-            
-            if len(stats[..., -1]) >= 5:
-                stats_order = np.argsort(stats[..., -1])[::-1][1:]
-                eyel_mask, eyer_mask, statsl, statsr = label_lr_split(labels, stats, stats_order[0], stats_order[1])
-                img, depth, xyxy, _ = process_cuts(part_info['img'], part_info['depth'], part_info['xyxy'], statsl)
-                tag2pinfo['eyer'] = {'img': img, 'xyxy': xyxy, 'depth': depth}
-                img, depth, xyxy, _ = process_cuts(part_info['img'], part_info['depth'], part_info['xyxy'], statsr)
-                tag2pinfo['eyel'] = {'img': img, 'xyxy': xyxy, 'depth': depth}
-
-                browl_mask, browr_mask, statsl, statsr = label_lr_split(labels, stats, stats_order[2], stats_order[3])
-                img, depth, xyxy, _ = process_cuts(part_info['img'], part_info['depth'], part_info['xyxy'], statsl)
-                tag2pinfo['browr'] = {'img': img, 'xyxy': xyxy, 'depth': depth}
-                img, depth, xyxy, _ = process_cuts(part_info['img'], part_info['depth'], part_info['xyxy'], statsr)
-                tag2pinfo['browl'] = {'img': img, 'xyxy': xyxy, 'depth': depth}
+        if tblr_split and tag == 'eyes':
+            tag2pinfo.update(eyes_split(pinfo))
         else:
-            tag2pinfo['eyes'] = part_info
+            tag2pinfo[tag] = pinfo
 
 
     if tblr_split:
