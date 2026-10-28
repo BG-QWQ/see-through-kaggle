@@ -116,7 +116,7 @@ STEPS = 30
 
 ### 左右拆分与画质边界
 
-左右拆分属于模型输出之后的连通域后处理。拆分子层继承原层深度排序，并保留相同深度下的原层位置，避免单侧虹膜被眼白盖住；额外孤岛及淡 alpha 不再因仅保留两大区域、掩码膨胀或再次裁切而丢失／重复。相连的部位不能由连通域可靠拆开，仍保留整层。
+左右拆分属于模型输出之后的连通域后处理。拆分子层继承原层深度排序，并保留相同深度下的原层位置；额外孤岛及淡 alpha 不再因仅保留两大区域、掩码膨胀或再次裁切而丢失／重复。相连的部位不能由连通域可靠拆开，仍保留整层。PSD 写出时，眼部子层固定按眼白 → 虹膜 → 睫毛 → 眉毛的后到前顺序排列，不能让独立深度中位数或相同深度的插入顺序把眼白放到虹膜上；非眼部层的排序位置、原始像素和数值深度不变。
 
 **2048 推理完成不代表画质合格。** 原始 RGBA 层中已经存在的背景污染、错误补全或语义分层错误，不能由左右拆分、文件校验或请求隔离修复。分辨率／精度的归因需要同一原图、检查点、seed、steps 与 depth 设置对照；不根据“没有 OOM”宣称画质正常，也不在后台偷偷降低分辨率。
 
@@ -138,6 +138,8 @@ STEPS = 30
 **混合精度边界不能省略**：LayerDiff 已在 VAE 编码后把 conditioning 转回 UNet dtype；当前 Marigold 原实现没有这样做。fp32 VAE conditioning 与 fp16 latent 拼接会提升到 fp32，导致 fp16 UNet 报 dtype mismatch。本集成在同一推理文件内用 `_MixedDtypeMarigoldPipeline.single_infer()` 做一次入口转换；bf16/同 dtype 仍使用原类。此边界已通过 CPU 真实小型模型验证，以及 Kaggle T4×2 完整分层、深度与 PSD 导出验收。
 
 **加载时也要选择 dtype**：T4×2 共享主机内存，不能让两个 worker 各自先构建完整 fp32 UNet/文本编码器再转 fp16。`_load_dtype_kwargs()` 在非 bf16 模式下按组件直接加载目标 dtype；VAE 从加载到推理均保留 fp32，不经过 fp16 舍入。默认 bf16 仍不向加载器传 dtype 参数，保留原加载路径。本地真实 checkpoint 冒烟已验证 fp32 VAE 权重逐项一致。
+
+**先卸载，再使用 CUDA**：非量化管线先在 CPU 确定各组件 dtype，再安装 group offload hooks；只有未启用卸载的路径才把整套管线移到 CUDA。LayerDiff 和 Marigold 均遵守此顺序，避免 fp32 在卸载尚未生效前因完整权重驻留而 OOM。修正启动峰值不保证 fp32 采样／解码能放入单张 T4，也不代表 fp32 能消除语义分层错误。
 
 2026-10-26 的 Kaggle 双 worker 实测还发现：group offload 会耗尽共享 30 GiB 主机内存并触发 OS OOM kill；关闭后，1280 解码需要 expandable segments 避免 CUDA 分配碎片。因此 notebook 批处理默认 `BATCH_GROUP_OFFLOAD=False`，并将 `CUDA_ALLOCATOR_CONF` 传入子进程；PyTorch 2.11+ 使用新环境变量名，旧版本使用兼容名称。Web 每次请求在独立进程中使用分阶段 group offload；进程隔离本身不改变模型推理数学、精度放置、seed、采样或 attention。PSD 左右拆分的独立修复与限制见上节。
 

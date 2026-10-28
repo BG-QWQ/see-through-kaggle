@@ -10,7 +10,7 @@ from utils.cv import center_square_pad_resize, img_alpha_blending, smart_resize,
 from utils.torch_utils import seed_everything
 from utils.io_utils import json2dict, dict2json, load_parts, save_tmp_img, load_part, save_psd
 from utils.torchcv import cluster_inpaint_part
-from utils.part_split import eyes_split, part_lr_split, tag_lr_split
+from utils.part_split import eyes_split, order_eye_layers, part_lr_split, tag_lr_split
 
 from psd_tools import PSDImage
 from safetensors.torch import load_file
@@ -473,6 +473,7 @@ def dump_parts_psd(tag2pinfo, frame_size, psd_savep, part_dict_list=None):
             part_dict_list.append(v)
     psd_depth_savep = osp.splitext(psd_savep)[0] + '_depth.psd'
     part_dict_list.sort(key=lambda x: x['depth_median'], reverse=True)
+    order_eye_layers(part_dict_list)
     save_psd(psd_savep, part_dict_list, frame_size[0], frame_size[1])
     save_psd(psd_depth_savep, part_dict_list, frame_size[0], frame_size[1], mode='L', img_key='depth')
     for pdict in tag2pinfo.values():

@@ -110,3 +110,18 @@ def tag_lr_split(tag, tag2pinfo):
                 tag2pinfo.update(replacement)
             else:
                 tag2pinfo[name] = info
+
+
+def order_eye_layers(parts):
+    """Restore the eye compositor's back-to-front order within eye-only slots."""
+    ranks = {}
+    for rank, tag in enumerate(('eyewhite', 'irides', 'eyelash', 'eyebrow')):
+        for name in (tag, f'{tag}-r', f'{tag}-l'):
+            ranks[name] = rank
+    indices = [index for index, part in enumerate(parts) if part['tag'] in ranks]
+    ordered = sorted((parts[index] for index in indices),
+                     key=lambda part: ranks[part['tag']])
+    # Depth estimates describe the eye group, not reliable ordering of its
+    # overlapping sublayers. Non-eye layers retain their exact sorted slots.
+    for index, part in zip(indices, ordered):
+        parts[index] = part

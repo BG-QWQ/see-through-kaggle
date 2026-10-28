@@ -10,6 +10,8 @@ from unittest.mock import Mock
 
 import cv2
 import numpy as np
+from PIL import Image
+from psd_tools import PSDImage
 
 UTILS = Path(__file__).resolve().parents[2] / 'common' / 'utils'
 SPEC = importlib.util.spec_from_file_location('part_split', UTILS / 'part_split.py')
@@ -37,7 +39,8 @@ def inference_functions(**dependencies):
     nodes = [node for node in source.body if isinstance(node, ast.FunctionDef)
              and node.name in {'save_part', 'further_extr', 'dump_parts_psd'}]
     namespace = {'np': np, 'cv2': cv2, 'os': os, 'osp': os.path,
-                 'eyes_split': SPLIT.eyes_split, 'tag_lr_split': SPLIT.tag_lr_split}
+                 'eyes_split': SPLIT.eyes_split, 'tag_lr_split': SPLIT.tag_lr_split,
+                 'order_eye_layers': SPLIT.order_eye_layers}
     exec(compile(ast.Module(body=nodes, type_ignores=[]),
                  str(UTILS / 'inference_utils.py'), 'exec'), namespace)
     namespace.update(dependencies)
@@ -241,6 +244,78 @@ class PartSplitTests(unittest.TestCase):
             np.testing.assert_array_equal(composite[alpha > 0],
                                           np.tile([0, 100, 0], (np.count_nonzero(alpha), 1)))
         np.testing.assert_array_equal(composites[0], composites[1])
+
+    def test_real_psd_keeps_pupils_visible_despite_inverted_or_tied_depth(self):
+        # The depth relations reproduce both captured failure modes, while all
+        # images are synthetic and no private inputs are needed by this test.
+        io_source = ast.parse((UTILS / 'io_utils.py').read_text())
+        save_node = next(node for node in io_source.body
+                         if isinstance(node, ast.FunctionDef) and node.name == 'save_psd')
+        io_namespace = {'Image': Image, 'np': np}
+        exec(compile(ast.Module(body=[save_node], type_ignores=[]),
+                     str(UTILS / 'io_utils.py'), 'exec'), io_namespace)
+        alpha = np.zeros((20, 20), dtype=np.uint8)
+        alpha[3:9, 2:7] = 255
+        alpha[3:9, 13:18] = 255
+        for iris_depth, white_depth in ((0.415686, 0.388235), (0.411765, 0.411765)):
+            composites = []
+            for enabled in (False, True):
+                with self.subTest(split=enabled, depths=(iris_depth, white_depth)):
+                    parts = {}
+                    for tag, color, depth in (
+                            ('irides', [0, 130, 110], iris_depth),
+                            ('eyewhite', [255, 255, 255], white_depth),
+                            ('eyelash', [10, 10, 10], 0.8),
+                            ('eyebrow', [80, 40, 20], 0.9)):
+                        local_alpha = alpha.copy()
+                        if tag == 'eyelash':
+                            local_alpha[4:] = 0
+                        elif tag == 'eyebrow':
+                            local_alpha[:] = 0
+                            local_alpha[1, 2:7] = 255
+                            local_alpha[1, 13:18] = 255
+                        part = make_part(local_alpha, origin=(0, 0))
+                        part['tag'] = tag
+                        part['img'][..., :3] = color
+                        part['depth'][:] = depth
+                        parts[tag] = part
+                    # A non-eye layer deliberately lies between eye depth values.
+                    nose_alpha = np.zeros_like(alpha)
+                    nose_alpha[10, 10] = 255
+                    nose = make_part(nose_alpha, origin=(0, 0))
+                    nose['tag'] = 'nose'
+                    nose['depth'][:] = 0.4
+                    parts['nose'] = nose
+                    if enabled:
+                        for tag in ('eyewhite', 'irides', 'eyelash', 'eyebrow'):
+                            SPLIT.tag_lr_split(tag, parts)
+                    functions = inference_functions(
+                        save_psd=io_namespace['save_psd'], dict2json=Mock())
+                    for tag, part in parts.items():
+                        functions['save_part'](tag, '', part, save_to_disk=False)
+                    depth_sorted = sorted(parts.values(),
+                                          key=lambda part: part['depth_median'], reverse=True)
+                    nose_slot = next(index for index, part in enumerate(depth_sorted)
+                                     if part['tag'] == 'nose')
+                    with tempfile.TemporaryDirectory() as directory:
+                        path = Path(directory) / 'synthetic.psd'
+                        functions['dump_parts_psd'](parts, alpha.shape, str(path))
+                        psd = PSDImage.open(path)
+                        composite = np.array(psd.composite())
+                        self.assertEqual(list(psd)[nose_slot].name, 'nose')
+                        # Consumer-rendered opaque pupil centers must remain green.
+                        np.testing.assert_array_equal(composite[6, 4, :3], [0, 130, 110])
+                        np.testing.assert_array_equal(composite[6, 15, :3], [0, 130, 110])
+                        # Eyelashes must stay above the irides, not just whites.
+                        np.testing.assert_array_equal(composite[3, 4, :3], [10, 10, 10])
+                        for tag in ('irides', 'eyewhite'):
+                            visible_alpha = sum(
+                                int(np.asarray(layer.topil())[..., -1].sum())
+                                for layer in psd
+                                if layer.name == tag or layer.name.startswith(tag + '-'))
+                            self.assertEqual(visible_alpha, int(alpha.sum()))
+                        composites.append(composite)
+            np.testing.assert_array_equal(composites[0], composites[1])
 
 if __name__ == '__main__':
     unittest.main()
