@@ -5,7 +5,7 @@
 ## 使用
 
 1. 在 Kaggle 网页 Import Notebook 上传 [`see_through_kaggle.ipynb`](see_through_kaggle.ipynb)，确认 **GPU T4 x2**、**Internet On**。
-2. **只改 Cell 2 配置区**。默认仓库地址为上游；若上游尚未合入本集成，改 `REPO_URL` 为包含这些文件的 fork，或上传完整仓库为 Kaggle Dataset，并设置 `REPO_DIR`。Cell 3 检查 dtype CLI、`app_gradio.py`、`inference_worker.py`、`inference_process.py` 和依赖文件，缺失时停止，避免旧 Dataset 静默运行旧服务。只读 Dataset 会复制到 `DATASET_COPY_DIR`，避免 editable install 写入失败。
+2. **只改 Cell 2 配置区**。默认 `REPO_URL` 为 [`BG-QWQ/see-through-kaggle`](https://github.com/BG-QWQ/see-through-kaggle)，包含本集成；也可改成其他完整 fork，或上传完整仓库为 Kaggle Dataset 并设置 `REPO_DIR`。重跑 Cell 3 会将已有工作副本的 origin 对齐 `REPO_URL`，只允许 fast-forward 更新；分叉或本地冲突会停止，不强制覆盖。Cell 3 检查 dtype CLI、`app_gradio.py`、`inference_worker.py`、`inference_process.py` 和依赖文件，缺失时停止，避免旧 Dataset 静默运行旧服务。只读 Dataset 会复制到 `DATASET_COPY_DIR`，避免 editable install 写入失败。
 3. 运行 Cell 1–4 安装、检查依赖。Cell 4 安装到 `ENV_DIR` 独立 venv，不修改 notebook kernel 的预装包，也不需要重启 kernel。批处理运行 Cell 5–7；Web UI 运行 Cell 8，备用隧道再运行 Cell 9。不要同时跑批处理与 Web UI。
 4. CLI 提交：修改 [`kernel-metadata.json`](kernel-metadata.json) 的 `<username>`，在本目录运行 `kaggle kernels push -p .`。挂载 Dataset 时也要配置 `dataset_sources`。CLI 用 `machine_shape: "NvidiaTeslaT4"`；网页导入使用 notebook 的 `metadata.kaggle.accelerator: "nvidiaTeslaT4"`。两种路径都需确认实际分配了两张 T4。
 
@@ -13,7 +13,7 @@
 
 | 变量 | 含义 |
 |---|---|
-| `REPO_URL` / `REPO_BRANCH` / `REPO_DIR` | fork/上游地址、分支或 commit、仓库路径；重跑 Cell 3 更新 |
+| `REPO_URL` / `REPO_BRANCH` / `REPO_DIR` | 默认本集成 fork、分支或 commit、仓库路径；重跑 Cell 3 对齐 origin 并更新 |
 | `HF_TOKEN` | 可选；模型公开，空字符串即可；打印脱敏，仅通过子进程环境传递，不保存登录凭据 |
 | `DTYPE` | T4 用 `fp16`，VAE 保持 `fp32`；数值异常回退 `fp32` |
 | `RESOLUTION` / `RESOLUTION_DEPTH` / `STEPS` / `SEED` | 批处理参数；steps/seed/depth 也用于 Web UI |

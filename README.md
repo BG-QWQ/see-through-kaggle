@@ -79,8 +79,8 @@ ln -sf common/assets assets
 
 Import [`kaggle/see_through_kaggle.ipynb`](kaggle/see_through_kaggle.ipynb) into Kaggle and select
 **GPU T4 x2** with **Internet On**. All inference and service settings are in **Cell 2**.
-Use a fork containing this integration, or upload a repository snapshot as a Kaggle Dataset,
-if the upstream branch does not yet include these files.
+The notebook defaults to [BG-QWQ/see-through-kaggle](https://github.com/BG-QWQ/see-through-kaggle),
+which contains this integration. A complete repository snapshot can also be mounted as a Kaggle Dataset.
 
 The notebook installs minimal dependencies in an isolated venv without changing Kaggle's base packages,
 runs one batch worker per GPU, exports PSDs,
