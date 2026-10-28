@@ -60,6 +60,32 @@ Web 父进程仅负责队列、结果缓存与轻量监督；每个请求启动�
 - 请求 ID 不是用户鉴权；请勿同时公开 ID 和公网地址。没有针对敏感内容的访问控制，仍应遵守页面英文安全提示。
 - **cloudflared Quick Tunnel 不支持 SSE，也没有在线时长保证**，见 [Cloudflare 官方限制](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/#limitations)。备用入口用于短 HTTP 状态查询与文件下载，不能承诺重放原来的 Gradio 进度流。不要把备用链接启动成功当成长时间实时推理验收。
 
+### Python 客户端：上传与下载独立恢复
+
+[`client_gradio.py`](../inference/scripts/client_gradio.py) 使用短 HTTP 提交／状态查询，不依赖 Gradio 的长 SSE 连接，也不会自动下载整个 gallery。它需要当前代码中的 `request_snapshot` 接口；旧服务需在已有请求完成后更新代码并重启，不能靠刷新网页升级。
+
+在仓库根目录运行，`PRIMARY_URL`／`BACKUP_URL` 分别设为当前 session 输出的主／备用地址：
+
+```bash
+uv run --no-project --python python3.12 --with httpx==0.28.1 \
+  python inference/scripts/client_gradio.py run "$PRIMARY_URL" common/assets/test_image.png \
+  --backup "$BACKUP_URL" --resolution 1024 --steps 30 --output workspace/client-results
+```
+
+请求 ID 会在推理提交前保存到 `workspace/client-results/<ID>/request.json`。已生成 ID 后，连接中断或提示提交结果不确定时，**不要再次运行 `run`**，使用同一 ID 找回：
+
+```bash
+uv run --no-project --python python3.12 --with httpx==0.28.1 \
+  python inference/scripts/client_gradio.py recover "$PRIMARY_URL" "$REQUEST_ID" \
+  --backup "$BACKUP_URL" --output workspace/client-results
+```
+
+- 上传和读写默认使用 120 秒网络静默超时，连接／连接池等待各 30 秒；`--timeout` 可调整读写超时。`--attempts` 默认 3，是每个可恢复传输操作的总尝试次数，不是推理次数。
+- 只有上传、只读状态查询和文件下载会对暂时网络错误、TLS EOF、429／502／503／504 进行有界重试。创建 ID 与推理提交不自动重试；提交回执丢失会保留本地 ID 并退出，不猜测是否需要重跑。证书校验失败、鉴权失败及其他永久 HTTP 错误直接报错，不关闭 TLS 校验。
+- 状态查询与下载可轮换到显式配置的备用入口，两者必须指向同一个仍存活的服务。也可直接将备用地址作为 `recover` 的第一个参数；全程不需要 SSE。`--wait-timeout` 默认 7200 秒，只限制客户端轮询等待，不取消后端推理；单次网络操作仍有独立超时。
+- PSD 下载先写临时文件，校验服务端报告的大小和 SHA256 后才原子替换 `<ID>/input.psd`。失败不覆盖原有完成文件；不完整或损坏的传输不会伪报成功。同一 ID 的 PSD 大小／哈希若改变则拒绝接受，允许重新建立相同内容的展示缓存。
+- 回执包含服务地址和请求 ID，按私有文件保存；默认输出在被 Git 忽略的 `workspace/`。不要公开或提交这些文件。服务关闭、工作目录丢失或两条隧道均不可达时，重试不能恢复已经不存在的结果。
+
 
 
 ## 依赖隔离
@@ -94,6 +120,7 @@ STEPS = 30
 - [`inference/scripts/inference_process.py`](../inference/scripts/inference_process.py)：轻量请求进程监督、超时与停止管理。
 - [`inference/scripts/inference_worker.py`](../inference/scripts/inference_worker.py)：每请求独立解释器入口，复用现有推理 API 并输出 PSD/gallery。
 - [`inference/scripts/inference_jobs.py`](../inference/scripts/inference_jobs.py)：无模型依赖的请求回执、状态转换与完成结果存储，不重试推理。
+- [`inference/scripts/client_gradio.py`](../inference/scripts/client_gradio.py)：带有界安全重试、请求 ID 恢复和 PSD 大小／SHA256 校验的独立 Python 客户端；不重试推理。
 
 上游推理修改集中在 [`inference_psd_quantized.py`](../inference/scripts/inference_psd_quantized.py) 的 dtype／混合精度边界与可选进度回调，以及 [`common/modules/layerdiffuse/diffusers_kdiffusion_sdxl.py`](../common/modules/layerdiffuse/diffusers_kdiffusion_sdxl.py)、[`common/modules/marigold/marigold_depth_pipeline.py`](../common/modules/marigold/marigold_depth_pipeline.py) 的采样步观察回调；[`inference_psd_blockswap.py`](../inference/scripts/inference_psd_blockswap.py) 的对应入口同步接受可选回调。回调只传 CPU 整数，不读取张量或主动同步 CUDA；未提供回调时维持原调用方式。默认 `bf16` 不变；已有 blockswap 调用不提供 dtype 字段时仍沿用 bf16。没有修改 `inference_psd.py` 或 annotators。
 

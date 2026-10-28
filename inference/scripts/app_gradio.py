@@ -2,6 +2,7 @@
 
 import atexit
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -103,6 +104,36 @@ def recover_request(request_id):
     if state == "queued":
         return "Prepared / queued; inference has not started yet. Check Kaggle logs before submitting another request.", None, []
     return f"{state.capitalize()}: {record.get('error', '')}", None, []
+
+
+def request_snapshot(request_id: str) -> dict:
+    """Read durable state and PSD metadata without a queue or gallery downloads."""
+    try:
+        record = _JOBS.get(request_id)
+    except ValueError as error:
+        raise gr.Error(str(error)) from None
+    snapshot = {"request_id": request_id, "state": "missing"}
+    if record is None:
+        return snapshot
+    snapshot["state"] = record["state"]
+    if record["state"] == "running" and record["owner"] != _JOBS.instance_id:
+        snapshot.update(state="unconfirmed", error="This request belongs to another server instance; do not resubmit automatically.")
+        return snapshot
+    for key in ("progress", "error"):
+        if key in record:
+            snapshot[key] = record[key]
+    if record["state"] == "completed":
+        folder = _JOBS.job_dir(request_id)
+        relative = record["result"]["psd"]
+        cached = _cache_file(folder, relative)
+        digest = hashlib.sha256()
+        size = 0
+        with (folder / relative).open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+        snapshot["psd"] = {"path": cached, "size": size, "sha256": digest.hexdigest()}
+    return snapshot
 
 
 def restore_request(request_id):
@@ -249,6 +280,7 @@ with gr.Blocks(title="See-through: Layer Decomposition", delete_cache=(3600, 360
         examples=[["common/assets/test_image.png", 1024, 42, False]],
         inputs=[input_image, resolution, seed, tblr_split],
     )
+    gr.api(request_snapshot, queue=False)
 
 def serve():
     stopped = threading.Event()
