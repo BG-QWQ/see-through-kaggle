@@ -1,8 +1,10 @@
 """CPU-only receipt and artifact persistence using real temporary files."""
 
+import asyncio
 from pathlib import Path
 import sys
 import tempfile
+from threading import Event
 import unittest
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -207,6 +209,98 @@ class JobStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.fail(token, "completed", "not success")
         self.assertEqual(self.store.get(token), first)
+
+
+class _PausedJobStore(JobStore):
+    def __init__(self, root):
+        super().__init__(root)
+        self.started = Event()
+        self.release = Event()
+
+    def complete(self, token, job_dir, result):
+        self.started.set()
+        if not self.release.wait(5):
+            raise TimeoutError("Test did not release the disk handoff")
+        return super().complete(token, job_dir, result)
+
+
+class PersistenceCancellationTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.store = _PausedJobStore(self.root / "receipts")
+        self.token = self.store.create()
+        self.store.start(self.token, {"seed": 123})
+        self.worker_temporary = tempfile.TemporaryDirectory(dir=self.root)
+        self.addCleanup(self.worker_temporary.cleanup)
+        self.worker = Path(self.worker_temporary.name)
+        (self.worker / "output.psd").write_bytes(b"persisted PSD bytes")
+        (self.worker / "layer.png").write_bytes(b"persisted layer bytes")
+        (self.worker / "input.png").write_bytes(b"synthetic private input")
+        self.result = {
+            "psd": "output.psd",
+            "gallery": [{"path": "layer.png", "label": "Layer"}],
+        }
+        self.tasks = []
+
+    async def asyncTearDown(self):
+        self.store.release.set()
+        await asyncio.gather(*self.tasks, return_exceptions=True)
+
+    async def begin_handoff(self):
+        task = asyncio.create_task(self.store.persist(self.token, self.worker, self.result))
+        self.tasks.append(task)
+        self.assertTrue(await asyncio.to_thread(self.store.started.wait, 5))
+        return task
+
+    def assert_saved_after_worker_cleanup(self):
+        self.worker_temporary.cleanup()
+        reopened = JobStore(self.store.root)
+        record = reopened.get(self.token)
+        self.assertEqual(record["state"], "completed")
+        directory = reopened.job_dir(self.token)
+        self.assertEqual((directory / record["result"]["psd"]).read_bytes(), b"persisted PSD bytes")
+        self.assertEqual((directory / record["result"]["gallery"][0]["path"]).read_bytes(), b"persisted layer bytes")
+        self.assertFalse((directory / "artifacts/input.png").exists())
+        return record
+
+    async def test_uninterrupted_handoff_returns_durable_receipt(self):
+        task = await self.begin_handoff()
+        self.store.release.set()
+        record = await task
+        self.assertEqual(record, self.assert_saved_after_worker_cleanup())
+
+    async def test_repeated_cancellation_waits_for_durable_outputs_then_propagates(self):
+        task = await self.begin_handoff()
+        for _ in range(2):
+            task.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(task.done())
+            self.assertTrue((self.worker / "output.psd").is_file())
+            self.assertEqual(self.store.get(self.token)["state"], "running")
+        self.store.release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        completed = self.assert_saved_after_worker_cleanup()
+        self.store.fail(self.token, "cancelled", "Late cancellation cleanup")
+        self.assertEqual(self.store.get(self.token), completed)
+
+    async def test_disk_failure_after_cancellation_is_not_reported_as_completion(self):
+        self.result["gallery"][0]["path"] = "missing.png"
+        task = await self.begin_handoff()
+        task.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+        self.store.release.set()
+        with self.assertRaises(FileNotFoundError) as raised:
+            await task
+        self.assertTrue((self.worker / "output.psd").is_file())
+        self.assertEqual(self.store.get(self.token)["state"], "running")
+        self.store.fail(self.token, "failed", raised.exception)
+        record = self.store.get(self.token)
+        self.assertEqual(record["state"], "failed")
+        self.assertNotIn("result", record)
 
 
 if __name__ == "__main__":

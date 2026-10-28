@@ -369,3 +369,18 @@ Gradio 6.12 的该提示不能当作“原请求已经恢复”：前端会探�
 - [浏览器离线／重载／手动找回记录](../workspace/kaggle-connection-20261028T100530Z/browser-reconnection-v3.json)、[找回运行状态](../workspace/kaggle-connection-20261028T100530Z/browser-recovered-running-v3.png)、[完成结果与下载界面](../workspace/kaggle-connection-20261028T100530Z/browser-recovered-completed-v3.png)、[英文提示](../workspace/kaggle-connection-20261028T100530Z/english-notice-ui.png)
 - [远端最终 verdict](../workspace/kaggle-connection-20261028T100530Z/remote-output/connection-verification/verdict.json)、同目录源码 attestations／状态采样，及 `remote-output/see-through-jobs/` 的实际保存文件与回执
 - [取消／备用失败／私有模式 smoke](../workspace/kaggle-connection-20261028T100530Z/storage-failure-smoke.json)、[可重放 CPU notebook](../workspace/kaggle-connection-20261028T100530Z/see_through_connection.ipynb) 与 CLI metadata；测试链接已随正常关闭失效。
+
+## 2026-10-28：新版代码的原生 notebook 有限稳定性验收
+
+直接运行当前 `see_through_kaggle.ipynb`，只改配置单元的私有源码来源、测试参数／保活时间并增加源码校验，其余 11 个单元保持一致；远端 183 个源文件哈希与本机一致。Tesla T4×2，Web 仅使用 GPU0；torch 2.8.0+cu128、Gradio 6.12.0、fp16 compute／fp32 VAE、10 steps、seed 42、depth 768。
+
+| 场景 | 后端推理耗时 | 实际结果 |
+| --- | --- | --- |
+| 1024 连续两次 | 507.2／497.6 秒 | 两份 PSD 字节一致，均含 16 个像素图层 |
+| 1536 运行中取消 | 未完成推理 | 身体采样到 1/10 后取消，回执确认 worker 已回收；不算完整 1536 成功 |
+| 取消后的新 512 请求 | 274.3 秒 | 新 worker 成功，PSD 含 18 个像素图层 |
+
+三个完成请求均通过实际网页找回结果、显示 24 项 gallery 并下载 PSD。最后一个请求在保活截止前开始、截止后完成；原生流程停止接单、等待完成并保留 60 秒下载宽限后正常关闭，Kaggle 最终 `COMPLETE`。
+
+边界：Python 客户端仍出现上传超时／下载 TLS EOF，不能宣称公网传输完全稳定；备用入口找回真实 GPU 结果通过，但本轮没有完成其在线 PSD 下载验收。不新增完整 1536／2048、完整 fp32 回退、长时 SSE 或任意输入质量保证。原始回执、源码与模型版本、浏览器文件复核和失败记录仅保存在本机 [稳定性证据](../workspace/kaggle-post-refactor-20261028T133516Z/stability-verdict.json)；实现细节及常规本地检查写入提交说明。
+

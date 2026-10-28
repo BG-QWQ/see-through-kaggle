@@ -261,7 +261,6 @@ class MarigoldDepthPipeline(DiffusionPipeline):
         ensemble_kwargs: Dict = None,
         img_list=None,
         step_callback: Optional[Callable[[int, int], None]] = None,
-        **kwargs
     ) -> MarigoldDepthOutput:
         """
         Function invoked when calling the pipeline.

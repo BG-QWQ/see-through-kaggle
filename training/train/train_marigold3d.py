@@ -402,7 +402,8 @@ def depth_benchmark_marigold(
             pipe_out = pipe(
                 cond_latent=rgb_latent[0],
                 color_map=None,
-                **args.validation,
+                **{key: value for key, value in args.validation.items()
+                   if key not in {"main_val_metric", "main_val_metric_goal", "init_seed"}},
             )
             # depth_pred = pipe_out.depth_tensor
             # depth = batch['depth_list'][jj]
@@ -500,7 +501,8 @@ def visualize_batch(args, batch, model, vae, dataset, accelerator: Accelerator, 
             # tensor2img(img, 'pil', denormalize=True, mean=127.5, std=127.5),
             color_map=None,
             cond_latent=cond_latent,
-            **args.validation,
+            **{key: value for key, value in args.validation.items()
+               if key not in {"main_val_metric", "main_val_metric_goal", "init_seed"}},
         )
         depth_pred: np.ndarray = pipe_out.depth_tensor
         drawables = [{'img': argb2rgba(tensor2img(img, denormalize=True)), 'depth': depth.to(device='cpu', dtype=torch.float32).numpy()} for img, depth in zip(img_list, depth_pred)]

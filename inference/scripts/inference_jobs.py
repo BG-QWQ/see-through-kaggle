@@ -1,5 +1,7 @@
 """Disk-bound inference receipts and final artifacts, independent of UI delivery."""
 
+import asyncio
+from contextlib import suppress
 from datetime import datetime, timezone
 import json
 import os
@@ -15,6 +17,26 @@ _TOKEN = re.compile(r"[0-9a-f]{32}")
 
 def _now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _artifact_paths(relative, source_root, destination_root):
+    if not isinstance(relative, str):
+        raise ValueError("Artifact paths must be relative strings")
+    path = Path(relative)
+    if path.is_absolute() or not path.parts or ".." in path.parts:
+        raise ValueError("Artifact path escapes worker directory")
+    source = source_root / path
+    resolved = source.resolve(strict=True)
+    if not resolved.is_relative_to(source_root) or source != resolved:
+        raise ValueError("Artifact path escapes worker directory or uses a symbolic link")
+    if not source.is_file():
+        raise ValueError("Artifact must be a file")
+    destination = destination_root / path
+    if not destination.resolve().is_relative_to(destination_root):
+        raise ValueError("Artifact destination escapes storage")
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError(destination)
+    return path, source, destination
 
 
 class JobStore:
@@ -106,22 +128,7 @@ class JobStore:
             moves = {}
 
             def artifact(relative):
-                if not isinstance(relative, str):
-                    raise ValueError("Artifact paths must be relative strings")
-                path = Path(relative)
-                if path.is_absolute() or not path.parts or ".." in path.parts:
-                    raise ValueError("Artifact path escapes worker directory")
-                source = source_root / path
-                resolved = source.resolve(strict=True)
-                if not resolved.is_relative_to(source_root) or source != resolved:
-                    raise ValueError("Artifact path escapes worker directory or uses a symbolic link")
-                if not source.is_file():
-                    raise ValueError("Artifact must be a file")
-                destination = destination_root / path
-                if not destination.resolve().is_relative_to(destination_root):
-                    raise ValueError("Artifact destination escapes storage")
-                if destination.exists() or destination.is_symlink():
-                    raise FileExistsError(destination)
+                path, source, destination = _artifact_paths(relative, source_root, destination_root)
                 moves[path] = (source, destination)
                 return (Path("artifacts") / path).as_posix()
 
@@ -142,6 +149,19 @@ class JobStore:
                           finished_at=timestamp, updated_at=timestamp)
             self._write(token, record)
             return record
+
+    async def persist(self, token, job_dir, result):
+        # Keep temporary outputs alive until the disk handoff finishes, then
+        # propagate the original cancellation even after repeated cancel calls.
+        saving = asyncio.create_task(asyncio.to_thread(self.complete, token, job_dir, result))
+        try:
+            return await asyncio.shield(saving)
+        except asyncio.CancelledError:
+            while not saving.done():
+                with suppress(asyncio.CancelledError):
+                    await asyncio.shield(saving)
+            saving.result()
+            raise
 
     def cancel_queued(self, token):
         with self._lock:

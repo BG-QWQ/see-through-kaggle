@@ -275,6 +275,61 @@ def run_layerdiff(pipeline, imgp, save_dir, seed, num_inference_steps, resolutio
         Image.fromarray(full).save(osp.join(saved, f'{tag}.png'))
 
 
+def _load_depth_layers(saved, empty_array):
+    img_list = []
+    for tag in VALID_BODY_PARTS_V2:
+        tagp = osp.join(saved, f'{tag}.png')
+        if osp.exists(tagp):
+            tag_arr = np.array(Image.open(tagp))
+            tag_arr[..., -1][tag_arr[..., -1] < 15] = 0
+            img_list.append(tag_arr)
+        else:
+            img_list.append(empty_array)
+
+    compose_list = {'eyes': ['eyewhite', 'irides', 'eyelash', 'eyebrow'], 'hair': ['back hair', 'front hair']}
+    compose_dict = {}
+    for c, clist in compose_list.items():
+        imlist = []
+        taglist = []
+        for tag in clist:
+            p = osp.join(saved, tag + '.png')
+            if osp.exists(p):
+                tag_arr = np.array(Image.open(p))
+                tag_arr[..., -1][tag_arr[..., -1] < 15] = 0
+                imlist.append(tag_arr)
+                taglist.append(tag)
+        if len(imlist) > 0:
+            img = img_alpha_blending(imlist, premultiplied=False)
+            img_list[VALID_BODY_PARTS_V2.index(c)] = img
+            compose_dict[c] = {'taglist': taglist, 'imlist': imlist}
+    return img_list, compose_dict
+
+
+def _save_depth_parts(depth_pred, saved, compose_dict, blended_alpha, parts):
+    for ii, depth in enumerate(depth_pred[:-1]):
+        depth = (np.clip(depth, 0, 1) * 255).astype(np.uint8)
+        tag = VALID_BODY_PARTS_V2[ii]
+        if tag in compose_dict:
+            mask = blended_alpha > 256
+            for t, im in zip(compose_dict[tag]['taglist'][::-1], compose_dict[tag]['imlist'][::-1]):
+                mask_local = im[..., -1] > 15
+                mask_invis = np.bitwise_and(mask, mask_local)
+                depth_local = np.full(blended_alpha.shape, fill_value=255, dtype=np.uint8)
+                depth_local[mask_local] = depth[mask_local]
+                if np.any(mask_invis):
+                    depth_local[mask_invis] = np.median(depth[np.bitwise_and(mask_local, np.bitwise_not(mask_invis))])
+                mask = np.bitwise_or(mask, mask_local)
+
+                parts_info = parts.get(t, {})
+                Image.fromarray(depth_local).save(osp.join(saved, f'{t}_depth.png'))
+                parts[t] = parts_info
+            continue
+
+        parts_info = parts.get(tag, {})
+        Image.fromarray(depth).save(osp.join(saved, f'{tag}_depth.png'))
+        parts[tag] = parts_info
+
+
 def run_marigold(marigold_pipe, srcp, save_dir, seed, resolution_depth, progress_callback=None):
     """Run Marigold depth estimation. Matches inference_utils.apply_marigold logic.
 
@@ -297,38 +352,9 @@ def run_marigold(marigold_pipe, srcp, save_dir, seed, resolution_depth, progress
     resolution_depth = validate_resolution(resolution_depth)
     src_rescaled = resolution_depth[0] != src_h or resolution_depth[1] != src_w
 
-    img_list = []
-    exist_list = []
     empty_array = np.zeros((src_h, src_w, 4), dtype=np.uint8)
+    img_list, compose_dict = _load_depth_layers(saved, empty_array)
     blended_alpha = np.zeros((src_h, src_w), dtype=np.float32)
-
-    compose_list = {'eyes': ['eyewhite', 'irides', 'eyelash', 'eyebrow'], 'hair': ['back hair', 'front hair']}
-    for tag in VALID_BODY_PARTS_V2:
-        tagp = osp.join(saved, f'{tag}.png')
-        if osp.exists(tagp):
-            exist_list.append(True)
-            tag_arr = np.array(Image.open(tagp))
-            tag_arr[..., -1][tag_arr[..., -1] < 15] = 0
-            img_list.append(tag_arr)
-        else:
-            img_list.append(empty_array)
-            exist_list.append(False)
-
-    compose_dict = {}
-    for c, clist in compose_list.items():
-        imlist = []
-        taglist = []
-        for tag in clist:
-            p = osp.join(saved, tag + '.png')
-            if osp.exists(p):
-                tag_arr = np.array(Image.open(p))
-                tag_arr[..., -1][tag_arr[..., -1] < 15] = 0
-                imlist.append(tag_arr)
-                taglist.append(tag)
-        if len(imlist) > 0:
-            img = img_alpha_blending(imlist, premultiplied=False)
-            img_list[VALID_BODY_PARTS_V2.index(c)] = img
-            compose_dict[c] = {'taglist': taglist, 'imlist': imlist}
 
     for img in img_list:
         blended_alpha += img[..., -1].astype(np.float32) / 255
@@ -364,29 +390,7 @@ def run_marigold(marigold_pipe, srcp, save_dir, seed, resolution_depth, progress
     else:
         info = {'parts': {}}
 
-    parts = info['parts']
-    for ii, depth in enumerate(depth_pred[:-1]):
-        depth = (np.clip(depth, 0, 1) * 255).astype(np.uint8)
-        tag = VALID_BODY_PARTS_V2[ii]
-        if tag in compose_dict:
-            mask = blended_alpha > 256
-            for t, im in zip(compose_dict[tag]['taglist'][::-1], compose_dict[tag]['imlist'][::-1]):
-                mask_local = im[..., -1] > 15
-                mask_invis = np.bitwise_and(mask, mask_local)
-                depth_local = np.full((src_h, src_w), fill_value=255, dtype=np.uint8)
-                depth_local[mask_local] = depth[mask_local]
-                if np.any(mask_invis):
-                    depth_local[mask_invis] = np.median(depth[np.bitwise_and(mask_local, np.bitwise_not(mask_invis))])
-                mask = np.bitwise_or(mask, mask_local)
-
-                parts_info = parts.get(t, {})
-                Image.fromarray(depth_local).save(osp.join(saved, f'{t}_depth.png'))
-                parts[t] = parts_info
-            continue
-
-        parts_info = parts.get(tag, {})
-        Image.fromarray(depth).save(osp.join(saved, f'{tag}_depth.png'))
-        parts[tag] = parts_info
+    _save_depth_parts(depth_pred, saved, compose_dict, blended_alpha, info['parts'])
 
     dict2json(info, infop)
     Image.fromarray(blended).save(osp.join(saved, 'reconstruction.png'))

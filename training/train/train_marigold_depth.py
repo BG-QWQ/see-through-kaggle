@@ -397,7 +397,8 @@ def depth_benchmark_marigold(
             pipe_out = pipe(
                 tensor2img(img, 'pil', denormalize=True, mean=127.5, std=127.5),
                 color_map=None,
-                **args.validation,
+                **{key: value for key, value in args.validation.items()
+                   if key not in {"main_val_metric", "main_val_metric_goal", "init_seed"}},
             )
             depth_pred: np.ndarray = pipe_out.depth_tensor
             depth_pred, scale, shift = align_depth_least_square_torch(
@@ -514,7 +515,8 @@ def visualize_batch(args, batch, model, vae, dataset, accelerator: Accelerator, 
         pipe_out = pipe(
             tensor2img(img, 'pil', denormalize=True, mean=127.5, std=127.5),
             color_map=None,
-            **args.validation,
+            **{key: value for key, value in args.validation.items()
+               if key not in {"main_val_metric", "main_val_metric_goal", "init_seed"}},
         )
         depth_pred: np.ndarray = pipe_out.depth_tensor
         depth_pred, scale, shift = align_depth_least_square_torch(

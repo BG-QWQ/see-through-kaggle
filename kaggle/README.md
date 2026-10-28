@@ -54,7 +54,9 @@ Web 父进程仅负责队列、结果缓存与轻量监督；每个请求启动�
 - Run 在开始长推理前创建请求 ID，显示在 `Request ID / recovery ID`，并写入当前 URL 的 `#request=...`。同一 URL 重新打开时会查询该请求；切换到另一公网域名时，复制 ID 到输入框后点 `Check status / retrieve saved result`。这个操作只读状态／提取结果，**不会重新提交推理**。计算中显示真实阶段与步数，需要稍后再次检查。
 - 使用 Gradio API 时，先调用 `create_request` 获取 ID，再将 ID 作为 `inference` 的第一个参数；每次新推理使用新 ID。同一 ID 不能重复开始；`recover_request` 只读取既有请求，不是重试接口。
 - 完成的 PSD 与 gallery 先移入 `WORK_DIR/see-through-jobs/<ID>/artifacts`，原子提交完成回执后才清理临时目录和交付网页。原图与中间文件不进入这份结果存储；Gradio 展示缓存仍按小时清理，找回操作可从独立存储重新建立缓存。保留范围受 Kaggle session、磁盘和保存方式约束；Save & Run All 保存的版本可能保留这些工作目录输出，并非永久存储或自动删除保证。
+- 最终结果落盘交接已经开始时，取消会等待该次文件交接结束，再传播原取消异常；重复取消不会提前清理源目录。交接成功的回执不会被后续取消覆盖，磁盘失败则保留真实错误，不会伪报完成。这不改变模型推理阶段的取消行为。
 - 重启 app 后，同一工作目录内的已完成结果仍可按 ID 读取；旧实例的运行中记录只会提示无法确认，不会自动续算。显式取消、请求超时、服务器退出或平台回收仍会终止计算。`Cancel this page's request` 仅取消当前页面提交的事件，不是重开页面后对历史任务的跨会话取消。
+- 请求 ID 和已完成结果依赖原工作目录；切换 Kaggle 账号或新建 session 不会自动迁移它们。远端验证应重新核对当前账号的 notebook、输入数据和输出目录，不沿用旧实例的运行状态。
 - 请求 ID 不是用户鉴权；请勿同时公开 ID 和公网地址。没有针对敏感内容的访问控制，仍应遵守页面英文安全提示。
 - **cloudflared Quick Tunnel 不支持 SSE，也没有在线时长保证**，见 [Cloudflare 官方限制](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/#limitations)。备用入口用于短 HTTP 状态查询与文件下载，不能承诺重放原来的 Gradio 进度流。不要把备用链接启动成功当成长时间实时推理验收。
 

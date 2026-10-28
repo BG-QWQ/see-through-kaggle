@@ -78,22 +78,6 @@ def _saved_outputs(request_id, record):
     )
 
 
-async def _persist_result(request_id, job_dir, result):
-    # Finish the disk handoff before temporary inputs are removed, even if the
-    # Gradio task is cancelled after the model has already completed.
-    saving = asyncio.create_task(asyncio.to_thread(_JOBS.complete, request_id, job_dir, result))
-    cancelled = False
-    while not saving.done():
-        try:
-            await asyncio.shield(saving)
-        except asyncio.CancelledError:
-            cancelled = True
-    record = saving.result()
-    if cancelled:
-        raise asyncio.CancelledError
-    return record
-
-
 def recover_request(request_id):
     if not request_id:
         return "Run creates a request ID before inference. Keep it to retrieve results after a disconnection.", None, []
@@ -165,7 +149,7 @@ async def inference(request_id: str, image: Image.Image, resolution: int = 1024,
             }), encoding="utf-8")
             progress(None, desc="Starting isolated inference worker")
             result = await _WORKER.run(job_dir, on_progress=update_progress)
-            record = await _persist_result(request_id, job_dir, result)
+            record = await _JOBS.persist(request_id, job_dir, result)
         output_path, gallery = await asyncio.to_thread(_saved_outputs, request_id, record)
         progress(1.0, desc="Complete")
         _log(f"Request {request_id}: Total inference time: {time.monotonic() - started:.1f}s")
