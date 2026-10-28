@@ -109,7 +109,7 @@ STEPS = 30
 - 连续服务：历史长驻服务的 `KEEP_RESIDENT=True`／False 均未通过稳定性实测，该配置已删除。当前每请求进程隔离使成功、失败或超时的推理进程退出；OOM 后下一次请求使用新 worker，而非污染进程中的热重试。新架构有限序列验收通过，不表示单次峰值、任意输入质量或 PSD alpha／预览毛边已解决，详见[验证记录](VALIDATION.md)。
 - 依赖报错：确认错误来自 Cell 4 的独立环境，而不是基础 kernel 的旧安装日志；不要通过升级/降级系统包解决。运行时版本由 Cell 2 的 `TORCH_PACKAGES` 和精简 requirements 决定，修改后重跑 Cell 4。2026-10-27 的真实 Kaggle 验收已确认隔离环境 `pip check` 通过、CUDA 可用、基础环境包清单未变化。
 - 公网隧道：默认 Gradio `share=True` 使用出站 FRP 反代；失败时看 [Gradio 服务状态](https://status.gradio.app/)，改用 cloudflared quick tunnel。两种隧道都不可用时设 `TUNNEL='none'` 或关闭 Web UI，批处理不受影响。Kaggle 容器没有入站端口，不能从外部直连 7860。
-- 隧道**没有鉴权**，任何获得链接的人都可用。`queue(max_size=16)` 只限制排队，不能防止滥用；勿处理隐私图。下载输出缓存按小时清理，请及时保存。
+- 当前为无鉴权公网服务，上传图片及输出会暂存在 Kaggle。请勿上传敏感或未经授权的内容。`queue(max_size=16)` 只限制排队，不能防止滥用。下载输出缓存按小时清理，请及时保存。
 - 服务随 session 结束；常见限制为 12h 上限、交互约 20 分钟空闲断开、免费 GPU 30h/周，以 [Kaggle 当前文档与账号额度](https://www.kaggle.com/docs/notebooks) 为准。外部访客请求不保证 session 保活。
 - 2026-10-26 实测环境为 Python 3.13、torch 2.11.0+cu128、Tesla T4×2：1280 / 30 steps，两图并行各生成 17 层 PSD；总耗时约 16.9 / 18.6 分钟，peak VRAM 均为 13.01 GiB，共享内存峰值约 29.04 GiB，OOM 计数 0。采用直接 fp16 加载、fp32 VAE、批处理关闭 group offload、expandable segments。这只是两张样例，不保证所有输入的耗时/峰值。
 - 首次模型下载约 8GB [INFERENCE]；`/kaggle/working` 保存空间约 20GB，留意模型缓存和 PSD 占用。长期在线服务应使用已有官方 HF Space，不依赖临时 Kaggle session。

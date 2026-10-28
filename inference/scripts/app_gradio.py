@@ -101,7 +101,7 @@ with gr.Blocks(title="See-through: Layer Decomposition", delete_cache=(3600, 360
         "Every request runs in a fresh worker; failures do not reuse its CUDA state. "
         "A single request can still exhaust GPU or host memory. "
         "Do not run batch workers at the same time. "
-        "Public links are temporary and accessible to anyone — do not upload private images.\n\n"
+        "当前为无鉴权公网服务，上传图片及输出会暂存在 Kaggle。请勿上传敏感或未经授权的内容。\n\n"
         "**Disclaimer:** This demo uses a newer model checkpoint and "
         "may not fully reproduce identical results reported in the paper."
     )
