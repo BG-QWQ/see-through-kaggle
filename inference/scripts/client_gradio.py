@@ -18,6 +18,8 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
+_RECEIPT_FILE = "request.json"
+
 
 class SeeThroughError(RuntimeError):
     """An invalid service response or an unsuccessful request."""
@@ -107,7 +109,7 @@ def _request_directory(output_dir, request_id, *, create=False):
     if create:
         directory.mkdir(parents=True, exist_ok=True)
     # Validate both children before reading a receipt or updating either output.
-    _local_path(directory, "request.json")
+    _local_path(directory, _RECEIPT_FILE)
     _local_path(directory, "input.psd")
     return directory
 
@@ -187,7 +189,7 @@ class SeeThroughClient:
 
     def _receipt(self, request_id, output_dir, metadata=None, *, initial=False):
         directory = _request_directory(output_dir, request_id, create=True)
-        target = _local_path(directory, "request.json")
+        target = _local_path(directory, _RECEIPT_FILE)
         record = {"request_id": request_id, "base_url": self.base_url}
         if self.backup_url:
             record["backup_url"] = self.backup_url
@@ -292,7 +294,7 @@ class SeeThroughClient:
             time.sleep(min(poll_interval, remaining))
 
     def _load_receipt(self, request_id, directory):
-        receipt = _local_path(directory, "request.json")
+        receipt = _local_path(directory, _RECEIPT_FILE)
         if not receipt.exists():
             return
         descriptor = os.open(receipt, os.O_RDONLY | os.O_NOFOLLOW)
