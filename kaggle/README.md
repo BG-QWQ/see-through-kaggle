@@ -6,7 +6,7 @@
 
 1. 在 Kaggle 网页 Import Notebook 上传 [`see_through_kaggle.ipynb`](see_through_kaggle.ipynb)，确认 **GPU T4 x2**、**Internet On**。
 2. **只改 Cell 2 配置区**。默认 `REPO_URL` 为 [`BG-QWQ/see-through-kaggle`](https://github.com/BG-QWQ/see-through-kaggle)，包含本集成；也可改成其他完整 fork，或上传完整仓库为 Kaggle Dataset 并设置 `REPO_DIR`。重跑 Cell 3 会将已有工作副本的 origin 对齐 `REPO_URL`，只允许 fast-forward 更新；分叉或本地冲突会停止，不强制覆盖。Cell 3 检查 dtype CLI、`app_gradio.py`、`inference_worker.py`、`inference_process.py` 和依赖文件，缺失时停止，避免旧 Dataset 静默运行旧服务。只读 Dataset 会复制到 `DATASET_COPY_DIR`，避免 editable install 写入失败。
-3. 运行 Cell 1–4 安装、检查依赖。Cell 4 安装到 `ENV_DIR` 独立 venv，不修改 notebook kernel 的预装包，也不需要重启 kernel。批处理运行 Cell 5–7；Web UI 运行 Cell 8，备用隧道再运行 Cell 9。不要同时跑批处理与 Web UI。
+3. 默认 `RUN_BATCH=False`、`ENABLE_WEBUI=True`，Run All 会在 Cell 1–4 安装、检查依赖后跳过 Cell 5–7，直接在 Cell 8 创建公网链接，Cell 9 保活。只做批处理时设 `RUN_BATCH=True`、`ENABLE_WEBUI=False`，运行 Cell 1–7。两者都开启时，必须等所有批处理及校验、打包结束才会出现 Web 链接；不要同时跑批处理与 Web UI。依赖安装到 `ENV_DIR` 独立 venv，不修改基础 kernel，也不需要重启 kernel。
 4. CLI 提交：修改 [`kernel-metadata.json`](kernel-metadata.json) 的 `<username>`，在本目录运行 `kaggle kernels push -p .`。挂载 Dataset 时也要配置 `dataset_sources`。CLI 用 `machine_shape: "NvidiaTeslaT4"`；网页导入使用 notebook 的 `metadata.kaggle.accelerator: "nvidiaTeslaT4"`。两种路径都需确认实际分配了两张 T4。
 
 ### 配置入口
@@ -17,6 +17,7 @@
 | `HF_TOKEN` | 可选；模型公开，空字符串即可；打印脱敏，仅通过子进程环境传递，不保存登录凭据 |
 | `DTYPE` | T4 用 `fp16`，VAE 保持 `fp32`；数值异常回退 `fp32` |
 | `RESOLUTION` / `RESOLUTION_DEPTH` / `STEPS` / `SEED` | 批处理参数；steps/seed/depth 也用于 Web UI |
+| `RUN_BATCH` | 默认 False，跳过 Cell 5–7；True 才执行批处理、校验与打包。开启后会延后公网服务启动 |
 | `INPUT_DIR` / `SAVE_DIR` / `ARCHIVE_PATH` | 输入、输出、ZIP；输入为空时用仓库的测试图片 |
 | `NUM_WORKERS` | 一卡一个进程；自动限制为可用 GPU 数，不跨卡拆模型 |
 | `BATCH_GROUP_OFFLOAD` | 默认 False；双 worker 保持权重在各自 GPU，避免耗尽共享主机内存 |
@@ -32,6 +33,8 @@
 | `BOOTSTRAP_PACKAGES` / `TORCH_PACKAGES` / `TORCH_INDEX_URL` | Kaggle 启动钩子依赖、固定 CUDA PyTorch/torchvision wheel、安装源；不安装未使用的 torchaudio |
 
 超时、轮询、显存/alpha 验收阈值、运行时依赖和 cloudflared 下载地址也集中在 Cell 2。修改服务配置后重跑 Cell 8，cloudflared 模式再重跑 Cell 9；启动格子会关闭旧服务，避免同端口与显存冲突。`ENABLE_WEBUI=False` 重跑 Cell 8 会关闭旧服务。
+
+已有 Kaggle Notebook 的单元不会随 GitHub 更新自动替换。要使用新的默认 Web 流程，需重新导入更新后的 `.ipynb` 并恢复自己的 Cell 2 配置；仅在旧配置里添加 `RUN_BATCH=False` 不会跳过旧版未加开关的 Cell 5–7。正在运行的旧批处理可等待完成后再启动 Web；不要在批处理进程仍占 GPU 时另起 Web 推理。
 
 批处理实际使用 `--quant_mode none --dtype fp16`，不需要 bitsandbytes。模型仓库中的 NF4 配置使用 bf16 compute，不适合直接在 T4 上跑。两张 16GB 卡不是一个 32GB 显存池；Web UI 只使用 GPU0。
 
@@ -96,7 +99,7 @@ STEPS = 30
 - [ ] 根 `requirements.txt` 的 transformers / diffusers / accelerate 等 pin 是否更新？同步精简依赖，避免引入 Qt、annotators 或训练包。
 - [ ] 运行 `python -m py_compile inference/scripts/inference_psd_quantized.py inference/scripts/app_gradio.py inference/scripts/inference_worker.py inference/scripts/inference_process.py`，在装好精简依赖后实际运行推理 CLI `--help` 和本地 Gradio 页面。
 - [ ] 运行 `python -m unittest discover -s inference/tests -v` 检查 OS 进程生命周期；它不需要模型依赖，不替代真实 GPU 推理或公网验收。
-- [ ] 在 Kaggle 重新运行 Cell 1–7；Cell 6 验收每图 PSD 分层、stats dtype/显存/耗时、非透明/非黑分解图；Cell 7 验收归档包含每张图的 PSD。正常日志应有 `LayerDiff3D done`、`Marigold done`、`PSD assembly done`。
+- [ ] 设 `RUN_BATCH=True`、`ENABLE_WEBUI=False` 后，在 Kaggle 重新运行 Cell 1–7；Cell 6 验收每图 PSD 分层、stats dtype/显存/耗时、非透明/非黑分解图；Cell 7 验收归档包含每张图的 PSD。正常日志应有 `LayerDiff3D done`、`Marigold done`、`PSD assembly done`。
 - [ ] 从非 Kaggle 浏览器访问两种隧道之一，上传测试图，确认 gallery 非空并能下载分层 PSD。更换 Gradio pin 时也检查 gallery 与 PSD 在临时目录清理后仍可读取。
 - [ ] 新架构实际验收连续 1536／2048 请求、CUDA OOM 后新 worker 降分辨率恢复、输出缓存仍可下载、请求超时、SIGUSR1 排空、SIGTERM 停止及父进程强杀后无孤儿 GPU worker；记录资源与退出结果，不能把启动成功算作 GPU 稳定性通过。
 
@@ -120,6 +123,8 @@ CLI / Save & Run All 会在 notebook 执行结束后释放 session，因此 Cell
 手动中断 Cell 9、重跑 Cell 8 或排空超时使用 **SIGTERM → 等待 `PROCESS_STOP_TIMEOUT=15` 秒 → 必要时 SIGKILL**。先关闭 app，再关闭 cloudflared。app 负责停止并回收当前 worker，默认 `SEETHROUGH_WORKER_STOP_TIMEOUT=5` 秒；强杀父 app 时，其持有的 stdin 管道关闭，worker 的 EOF 守卫终止自身进程组，避免正常 GPU 工作遗留为孤儿。强制停止不同于正常排空，会中止当前请求；Kaggle 平台强制回收也不保证完成请求。
 
 ## 公网实跑验收
+
+2026-10-28 已在独立 Kaggle CPU 实例验证当前默认 Web 分支：实际执行 Cell 2、3、5–9，跳过批处理、校验和打包，生成 Gradio 公网链接，并从非 Kaggle 浏览器打开页面。此项只验证公网启动，使用最小 Web 依赖；不重跑模型、不消耗额外 GPU 配额，也不代表完整 CUDA 安装耗时或 cloudflared／fp32 验收。根因、原始日志和截图见[验证记录](VALIDATION.md)。
 
 以下均为**旧长驻服务的历史验收**，保留当时配置，不是当前逐请求隔离架构的验收结果。
 

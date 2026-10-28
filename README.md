@@ -82,11 +82,12 @@ Import [`kaggle/see_through_kaggle.ipynb`](kaggle/see_through_kaggle.ipynb) into
 The notebook defaults to [BG-QWQ/see-through-kaggle](https://github.com/BG-QWQ/see-through-kaggle),
 which contains this integration. A complete repository snapshot can also be mounted as a Kaggle Dataset.
 
-The notebook installs minimal dependencies in an isolated venv without changing Kaggle's base packages,
-runs one batch worker per GPU, exports PSDs,
-and provides an official-Space-derived Gradio UI with a temporary public share link
-(cloudflared fallback). T4 inference uses `--quant_mode none --dtype fp16` with fp32 VAEs;
-the CLI's default dtype remains bf16. Batch workers and the Web UI must not run together.
+The notebook installs minimal dependencies in an isolated venv without changing Kaggle's base packages.
+By default, `RUN_BATCH=False` skips batch inference and starts the Gradio Web UI with a temporary
+public share link (cloudflared fallback). Set `RUN_BATCH=True` for one-worker-per-GPU batch inference
+and PSD export; with both batch and Web enabled, the public link appears only after the batch finishes.
+T4 inference uses `--quant_mode none --dtype fp16` with fp32 VAEs; the CLI's default dtype remains bf16.
+Batch workers and the Web UI must not run together.
 The Web resolution ceiling is configurable with `WEB_MAX_RESOLUTION` (default 2048);
 each image still uses one GPU, not pooled T4 memory.
 See [`kaggle/README.md`](kaggle/README.md) for CLI submission, verification, platform limits,

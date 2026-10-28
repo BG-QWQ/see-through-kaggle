@@ -261,3 +261,29 @@ OOM、超时、权重缓存加载失败或仅部分迭代的尝试均不算有�
 - [原生实时日志（含传输重连）](../workspace/kaggle-request-isolation-20261027T171858Z/live-follow-v2.log) 与 [源码快照 manifest](../workspace/kaggle-request-isolation-20261027T171858Z/source-manifest-v2.json)
 
 五个远端服务均已结束，Kaggle 最终状态 `COMPLETE`；本轮产品推理源码版本的结论为 **PASSED_BOUNDED_VALIDATION**，不是全输入或永久在线保证。
+
+## 2026-10-28：main Run All 未出现公网链接
+
+### 根因与对照
+
+读取用户实际运行的 `已脱敏的 Kaggle notebook` 源码和原生日志后，确认其配置为 `ENABLE_WEBUI=True`、`TUNNEL='gradio'`，并非关闭了公网模式。约 235.5 秒的日志已进入 Cell 5：GPU0 分到 3 张测试图，GPU1 分到 2 张；采集到的日志尚无 Cell 8 启动记录。
+
+当时的 `main`（`19547e1`）没有批处理总开关。Run All 必须先在 Cell 5 等待所有批处理 worker 退出，再执行 Cell 6 校验、Cell 7 打包，最后才在 Cell 8 创建公网链接。因此“开启 Web”不等于“马上启动 Web”，即使分享配置正确，也会先被五张图片的批处理阻塞。
+
+此前成功的公网测试 notebook 删除了批处理单元，依赖安装后直接启动 Web；最近 request-isolation 验收则使用容器内 HTTP API、关闭 share。核心推理源码相同，不足以证明完整 main Run All 的公网启动流程相同。这是此前验收遗漏的入口流程差异。
+
+### 修复与验证
+
+- 新增 `RUN_BATCH=False` 默认配置；Cell 5、6、7 分别受该开关控制。默认 Run All 完成依赖安装后直接进入 Web 启动；需要批处理时显式设为 True。`ENABLE_WEBUI` 继续独立控制 Web，不改模型、dtype 或进程隔离实现。
+- 全部 notebook 代码格编译通过；三个启用分支的 AST 与原批处理／校验／归档实现完全一致。本轮没有重新跑启用状态下的 GPU 批处理。
+- 在 私有 Kaggle 验证 notebook（version 1） 使用独立 CPU 实例、最小 Gradio 6.12.0 环境，执行修复后的真实 Cell 2、3、5–9。没有启动批处理 worker、生成批处理文件或发起模型推理。
+- 专项测试约 53.8 秒生成 `gradio.live` 链接，已从本机 Ego 浏览器实际打开，看到完整上传／分辨率／Run 界面，起始分辨率 1024、上限 2048。该时间不包含正式路径的完整 CUDA PyTorch 依赖安装，不能当作用户 Run All 的总耗时保证。
+- 测试设置 180 秒保活，随后走产品默认 60 秒下载宽限，Web 返回码 0，Kaggle 最终 `COMPLETE`。推理核心四个文件 SHA256 与此前 GPU 验收完全相同；没有占用额外 GPU 任务，也未停止或重启用户正在运行的 notebook。
+
+### 使用边界与证据
+
+GitHub 更新不会替换已导入 Kaggle 的单元。需重新导入更新后的 notebook，保留自己的 Cell 2 配置；仅给旧版配置添加 `RUN_BATCH=False` 不足以跳过未受控的旧 Cell 5–7。若不想中断当前批处理，可以等其完成再运行 Cell 8；本次没有代替用户取消任务。
+
+本地 macOS 的完整流程探针曾遇到非本机 `/kaggle/working` 缓存路径及新缓存缺少 frpc 下载文件，未计为成功；远端 CPU 专项使用可写缓存并完成了真实公网访问。静态 Kaggle logs 接口在运行中仅返回换行，原生实时流才提供执行阶段；日志采集端的读取超时不等同服务退出。cloudflared 与正式 fp32 回退仍未完成端到端验收。
+
+原始附件位于 [`workspace/kaggle-public-link-20261028T073158Z`](../workspace/kaggle-public-link-20261028T073158Z)：[根因与验证结论](../workspace/kaggle-public-link-20261028T073158Z/public-link-diagnosis.json)、[用户实际运行日志](../workspace/kaggle-public-link-20261028T073158Z/native-live-log-probe.txt)、[远端完整收尾日志](../workspace/kaggle-public-link-20261028T073158Z/cpu-startup-finished.log)、[远端结果 JSON](../workspace/kaggle-public-link-20261028T073158Z/remote-output/public-startup-result.json)、[实际公网页面截图](../workspace/kaggle-public-link-20261028T073158Z/remote-public-ui.png) 与 `cpu-submission/` 可重放 notebook。测试公网链接已随正常关闭失效，不作为常驻服务入口。
