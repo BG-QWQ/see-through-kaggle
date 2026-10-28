@@ -1,11 +1,13 @@
 """Quantized inference for See-through full pipeline (layerdiff body -> head -> marigold depth -> PSD).
 
-Supports NF4 (default, 4-bit) and bf16 (baseline) modes. HF repos are auto-selected
-based on quant_mode. Builds pipelines directly without using inference_utils global singletons.
+Supports NF4 (default, 4-bit) and unquantized modes, with bf16 compute by default.
+HF repos follow quant_mode; --dtype fp16/fp32 supports older GPUs in unquantized mode.
+Builds pipelines directly without using inference_utils global singletons.
 
 Usage (from repo root):
     python inference/scripts/inference_psd_quantized.py --srcp image.png --save_to_psd
     python inference/scripts/inference_psd_quantized.py --quant_mode none --no_group_offload
+    python inference/scripts/inference_psd_quantized.py --srcp image.png --quant_mode none --dtype fp16 --save_to_psd
 """
 
 import os.path as osp
@@ -43,31 +45,47 @@ VALID_BODY_PARTS_V2 = [
     'tail', 'wings', 'objects'
 ]
 
+DTYPE_MAP = {'bf16': torch.bfloat16, 'fp16': torch.float16, 'fp32': torch.float32}
+
+
+def _load_dtype_kwargs(compute_dtype, vae_dtype):
+    # Preserve the original bf16 loading path. T4 workers must not each materialize
+    # a full fp32 UNet/text stack in the shared 29GB host RAM before casting.
+    if compute_dtype == DTYPE_MAP['bf16']:
+        return {}, {}
+    return {'torch_dtype': compute_dtype}, {'torch_dtype': {
+        'default': vae_dtype, 'unet': compute_dtype,
+        'text_encoder': compute_dtype, 'text_encoder_2': compute_dtype,
+    }}
+
 
 def build_layerdiff_pipeline(args):
     """Build the LayerDiff3D pipeline with appropriate quantization."""
     quant_mode = args.quant_mode
+    compute_dtype = getattr(args, 'compute_dtype', DTYPE_MAP['bf16'])
+    vae_dtype = getattr(args, 'vae_dtype', DTYPE_MAP['bf16'])
 
     if quant_mode == 'none':
-        # bf16 baseline: load from original repo
+        # Full-precision baseline: load from original repo
         repo = args.repo_id_layerdiff
+        model_kwargs, pipeline_kwargs = _load_dtype_kwargs(compute_dtype, vae_dtype)
         trans_vae = TransparentVAE.from_pretrained(repo, subfolder='trans_vae')
-        unet = UNetFrameConditionModel.from_pretrained(repo, subfolder='unet')
+        unet = UNetFrameConditionModel.from_pretrained(repo, subfolder='unet', **model_kwargs)
         pipeline = KDiffusionStableDiffusionXLPipeline.from_pretrained(
-            repo, trans_vae=trans_vae, unet=unet, scheduler=None)
+            repo, trans_vae=trans_vae, unet=unet, scheduler=None, **pipeline_kwargs)
         if args.cpu_offload:
-            pipeline.vae.to(dtype=torch.bfloat16)
-            pipeline.trans_vae.to(dtype=torch.bfloat16)
-            pipeline.unet.to(dtype=torch.bfloat16)
-            pipeline.text_encoder.to(dtype=torch.bfloat16)
-            pipeline.text_encoder_2.to(dtype=torch.bfloat16)
+            pipeline.vae.to(dtype=vae_dtype)
+            pipeline.trans_vae.to(dtype=vae_dtype)
+            pipeline.unet.to(dtype=compute_dtype)
+            pipeline.text_encoder.to(dtype=compute_dtype)
+            pipeline.text_encoder_2.to(dtype=compute_dtype)
             pipeline.enable_model_cpu_offload()
         else:
-            pipeline.vae.to(dtype=torch.bfloat16, device='cuda')
-            pipeline.trans_vae.to(dtype=torch.bfloat16, device='cuda')
-            pipeline.unet.to(dtype=torch.bfloat16, device='cuda')
-            pipeline.text_encoder.to(dtype=torch.bfloat16, device='cuda')
-            pipeline.text_encoder_2.to(dtype=torch.bfloat16, device='cuda')
+            pipeline.vae.to(dtype=vae_dtype, device='cuda')
+            pipeline.trans_vae.to(dtype=vae_dtype, device='cuda')
+            pipeline.unet.to(dtype=compute_dtype, device='cuda')
+            pipeline.text_encoder.to(dtype=compute_dtype, device='cuda')
+            pipeline.text_encoder_2.to(dtype=compute_dtype, device='cuda')
             if getattr(args, 'group_offload', False):
                 pipeline.enable_group_offload('cuda', num_blocks_per_group=1)
         # Cache tag embeddings and unload text encoders to save VRAM
@@ -77,18 +95,18 @@ def build_layerdiff_pipeline(args):
         repo = args.repo_id_layerdiff
         unet = UNetFrameConditionModel.from_pretrained(repo, subfolder='unet')
 
-        trans_vae = TransparentVAE.from_pretrained(repo, subfolder='trans_vae')  # always bf16
+        trans_vae = TransparentVAE.from_pretrained(repo, subfolder='trans_vae')  # VAE dtype follows vae_dtype
         pipeline = KDiffusionStableDiffusionXLPipeline.from_pretrained(
             repo, trans_vae=trans_vae, unet=unet, scheduler=None)
 
         if args.cpu_offload:
-            # VAE + TransparentVAE to bf16; quantized components handled by bnb
-            pipeline.vae.to(dtype=torch.bfloat16)
-            pipeline.trans_vae.to(dtype=torch.bfloat16)
+            # VAE precision is independent of the bnb quantized components
+            pipeline.vae.to(dtype=vae_dtype)
+            pipeline.trans_vae.to(dtype=vae_dtype)
             pipeline.enable_model_cpu_offload()
         else:
-            pipeline.vae.to(dtype=torch.bfloat16, device='cuda')
-            pipeline.trans_vae.to(dtype=torch.bfloat16, device='cuda')
+            pipeline.vae.to(dtype=vae_dtype, device='cuda')
+            pipeline.trans_vae.to(dtype=vae_dtype, device='cuda')
             # Don't manually .to(cuda) quantized components -- bnb handles device placement
             if getattr(args, 'group_offload', False):
                 pipeline.enable_group_offload('cuda', num_blocks_per_group=1)
@@ -98,29 +116,46 @@ def build_layerdiff_pipeline(args):
     return pipeline
 
 
+class _MixedDtypeMarigoldPipeline(MarigoldDepthPipeline):
+    """Bridge fp32 VAE conditioning to the UNet's compute precision."""
+
+    def single_infer(self, cond_latent, num_inference_steps, generator):
+        return super().single_infer(
+            cond_latent.to(dtype=self.unet.dtype), num_inference_steps, generator)
+
+
 def build_marigold_pipeline(args):
     """Build the Marigold depth pipeline with appropriate quantization."""
     quant_mode = args.quant_mode
+    compute_dtype = getattr(args, 'compute_dtype', DTYPE_MAP['bf16'])
+    vae_dtype = getattr(args, 'vae_dtype', DTYPE_MAP['bf16'])
+    pipeline_cls = (MarigoldDepthPipeline if compute_dtype == vae_dtype
+                    else _MixedDtypeMarigoldPipeline)
 
     if quant_mode == 'none':
         repo = args.repo_id_depth
-        unet = UNetFrameConditionModel.from_pretrained(repo, subfolder='unet')
-        marigold_pipe = MarigoldDepthPipeline.from_pretrained(repo, unet=unet)
+        model_kwargs, pipeline_kwargs = _load_dtype_kwargs(compute_dtype, vae_dtype)
+        unet = UNetFrameConditionModel.from_pretrained(repo, subfolder='unet', **model_kwargs)
+        marigold_pipe = pipeline_cls.from_pretrained(repo, unet=unet, **pipeline_kwargs)
+        # Mixed components were loaded in their final dtype; never round the VAE via fp16.
+        pipeline_dtype = compute_dtype if compute_dtype == vae_dtype else None
         if args.cpu_offload:
-            marigold_pipe.to(dtype=torch.bfloat16)
+            marigold_pipe.to(dtype=pipeline_dtype)
+            marigold_pipe.vae.to(dtype=vae_dtype)
             marigold_pipe.enable_model_cpu_offload()
         else:
-            marigold_pipe.to(device='cuda', dtype=torch.bfloat16)
+            marigold_pipe.to(device='cuda', dtype=pipeline_dtype)
+            marigold_pipe.vae.to(dtype=vae_dtype)
             if getattr(args, 'group_offload', False):
                 marigold_pipe.enable_group_offload('cuda', num_blocks_per_group=1)
         marigold_pipe.cache_tag_embeds()
     else:
         # NF4: load from pre-quantized repo (auto-selected by REPO_MAP)
         repo = args.repo_id_depth
-        unet = UNetFrameConditionModel.from_pretrained(repo, subfolder='unet', torch_dtype=torch.bfloat16)
+        unet = UNetFrameConditionModel.from_pretrained(repo, subfolder='unet', torch_dtype=compute_dtype)
 
-        marigold_pipe = MarigoldDepthPipeline.from_pretrained(repo, unet=unet, torch_dtype=torch.bfloat16)
-        marigold_pipe.vae.to(device='cuda')
+        marigold_pipe = pipeline_cls.from_pretrained(repo, unet=unet, torch_dtype=compute_dtype)
+        marigold_pipe.vae.to(device='cuda', dtype=vae_dtype)
         marigold_pipe.unet.to(device='cuda')
         # Text encoder may be quantized (from pre-quantized repo) — only move device, not dtype
         if not getattr(marigold_pipe.text_encoder, 'is_quantized', False) and \
@@ -346,7 +381,7 @@ if __name__ == '__main__':
     parser.add_argument('--tblr_split', action='store_true',
                         help='try split parts (handwear, eyes, etc) into left-right components')
     parser.add_argument('--quant_mode', type=str, default='nf4', choices=['nf4', 'none'],
-                        help='quantization mode: nf4 (default, 4-bit) or none (bf16 baseline)')
+                        help='quantization mode: nf4 (default, 4-bit) or none (unquantized, bf16 by default)')
     parser.add_argument('--repo_id_layerdiff', type=str, default=None,
                         help='Override LayerDiff3D HF repo (auto-selected based on quant_mode)')
     parser.add_argument('--repo_id_depth', type=str, default=None,
@@ -362,6 +397,9 @@ if __name__ == '__main__':
                         help='Enable group offload to reduce peak VRAM (default: on)')
     parser.add_argument('--no_group_offload', action='store_false', dest='group_offload',
                         help='Disable group offload for faster inference on high-VRAM GPUs')
+    parser.add_argument('--dtype', type=str, default='bf16', choices=['bf16', 'fp16', 'fp32'],
+                        help='compute dtype for UNet/text encoders; fp16/fp32 for GPUs without bf16 '
+                             'support (e.g. T4). VAEs stay bf16 only when dtype=bf16, else fp32.')
     args = parser.parse_args()
 
     # Auto-select HF repos based on quant_mode
@@ -380,6 +418,10 @@ if __name__ == '__main__':
         args.repo_id_layerdiff = defaults['layerdiff']
     if args.repo_id_depth is None:
         args.repo_id_depth = defaults['depth']
+
+    args.compute_dtype = DTYPE_MAP[args.dtype]
+    # fp16 VAE decoding can overflow; use fp32 VAEs outside the bf16 baseline.
+    args.vae_dtype = torch.bfloat16 if args.dtype == 'bf16' else torch.float32
 
     srcp = args.srcp
     seed = args.seed
@@ -438,6 +480,7 @@ if __name__ == '__main__':
     # --- Stats ---
     stats = {
         'quant_mode': args.quant_mode,
+        'dtype': args.dtype,
         'peak_vram_gb': torch.cuda.max_memory_allocated() / 1024**3,
         'layerdiff_time_s': layerdiff_time,
         'marigold_time_s': marigold_time,

@@ -1,0 +1,20 @@
+# Minimal dependencies for Kaggle inference + Gradio Web UI.
+# See kaggle/see_through_kaggle.ipynb and kaggle/README.md.
+# torch/torchvision: installed separately from the CUDA wheel index into the
+# notebook's isolated ENV_DIR. Do not install this file into Kaggle's base kernel.
+-e ./common
+transformers==5.0.0
+diffusers==0.37.0
+huggingface-hub==1.7.2
+tokenizers==0.22.2
+accelerate==1.13.0
+safetensors==0.7.0
+einops==0.8.2
+scikit-learn==1.7.2
+pycocotools==2.0.11
+matplotlib==3.9.4
+psd-tools[composite]==1.14.2
+tqdm==4.67.3
+
+# Web UI — pinned to the sdk_version the official HF Space was last built with.
+gradio==6.12.0

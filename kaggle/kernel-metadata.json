@@ -1,0 +1,14 @@
+{
+  "id": "<username>/see-through-psd",
+  "title": "See-through PSD decomposition",
+  "code_file": "see_through_kaggle.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "machine_shape": "NvidiaTeslaT4",
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}

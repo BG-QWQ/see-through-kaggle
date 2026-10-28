@@ -75,6 +75,30 @@ ln -sf common/assets assets
 
 > **Note:** Always run scripts from the repository root as the working directory.
 
+## Run on Kaggle
+
+Import [`kaggle/see_through_kaggle.ipynb`](kaggle/see_through_kaggle.ipynb) into Kaggle and select
+**GPU T4 x2** with **Internet On**. All inference and service settings are in **Cell 2**.
+Use a fork containing this integration, or upload a repository snapshot as a Kaggle Dataset,
+if the upstream branch does not yet include these files.
+
+The notebook installs minimal dependencies in an isolated venv without changing Kaggle's base packages,
+runs one batch worker per GPU, exports PSDs,
+and provides an official-Space-derived Gradio UI with a temporary public share link
+(cloudflared fallback). T4 inference uses `--quant_mode none --dtype fp16` with fp32 VAEs;
+the CLI's default dtype remains bf16. Batch workers and the Web UI must not run together.
+The Web resolution ceiling is configurable with `WEB_MAX_RESOLUTION` (default 1536);
+each image still uses one GPU, not pooled T4 memory.
+See [`kaggle/README.md`](kaggle/README.md) for CLI submission, verification, platform limits,
+and the upstream synchronization checklist.
+
+The Web UI now runs each request in a fresh inference process, keeping models out of
+the queue-owning parent. A bounded Kaggle T4 campaign passed all 19 planned requests
+(13 completed outputs and 6 expected faults/stops), including repeated 2048/30-step
+inference and recovery after CUDA OOM. This does not lower single-request memory
+peaks or fix PSD alpha/preview artifacts.
+See the [quality and stability verification record](kaggle/VALIDATION.md).
+
 ## Scripts & Models
 
 ### Models
