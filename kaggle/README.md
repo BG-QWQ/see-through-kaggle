@@ -5,7 +5,7 @@
 ## 使用
 
 1. 在 Kaggle 网页 Import Notebook 上传 [`see_through_kaggle.ipynb`](see_through_kaggle.ipynb)，确认 **GPU T4 x2**、**Internet On**。
-2. **只改 Cell 2 配置区**。默认 `REPO_URL` 为 [`BG-QWQ/see-through-kaggle`](https://github.com/BG-QWQ/see-through-kaggle)，包含本集成；也可改成其他完整 fork，或上传完整仓库为 Kaggle Dataset 并设置 `REPO_DIR`。重跑 Cell 3 会将已有工作副本的 origin 对齐 `REPO_URL`，只允许 fast-forward 更新；分叉或本地冲突会停止，不强制覆盖。Cell 3 检查 dtype CLI、`app_gradio.py`、`inference_worker.py`、`inference_process.py` 和依赖文件，缺失时停止，避免旧 Dataset 静默运行旧服务。只读 Dataset 会复制到 `DATASET_COPY_DIR`，避免 editable install 写入失败。
+2. **只改 Cell 2 配置区**。默认 `REPO_URL` 为 [`BG-QWQ/see-through-kaggle`](https://github.com/BG-QWQ/see-through-kaggle)，包含本集成；也可改成其他完整 fork，或上传完整仓库为 Kaggle Dataset 并设置 `REPO_DIR`。重跑 Cell 3 会将已有工作副本的 origin 对齐 `REPO_URL`，只允许 fast-forward 更新；分叉或本地冲突会停止，不强制覆盖。Cell 3 检查 dtype CLI、Web app、worker、进程监督、`inference_jobs.py` 和依赖文件，缺失时停止，避免旧 Dataset 静默运行旧服务。只读 Dataset 会复制到 `DATASET_COPY_DIR`，避免 editable install 写入失败。
 3. 默认 `RUN_BATCH=False`、`ENABLE_WEBUI=True`，Run All 会在 Cell 1–4 安装、检查依赖后跳过 Cell 5–7，直接在 Cell 8 创建公网链接，Cell 9 保活。只做批处理时设 `RUN_BATCH=True`、`ENABLE_WEBUI=False`，运行 Cell 1–7。两者都开启时，必须等所有批处理及校验、打包结束才会出现 Web 链接；不要同时跑批处理与 Web UI。依赖安装到 `ENV_DIR` 独立 venv，不修改基础 kernel，也不需要重启 kernel。
 4. CLI 提交：修改 [`kernel-metadata.json`](kernel-metadata.json) 的 `<username>`，在本目录运行 `kaggle kernels push -p .`。挂载 Dataset 时也要配置 `dataset_sources`。CLI 用 `machine_shape: "NvidiaTeslaT4"`；网页导入使用 notebook 的 `metadata.kaggle.accelerator: "nvidiaTeslaT4"`。两种路径都需确认实际分配了两张 T4。
 
@@ -23,18 +23,21 @@
 | `BATCH_GROUP_OFFLOAD` | 默认 False；双 worker 保持权重在各自 GPU，避免耗尽共享主机内存 |
 | `CUDA_ALLOCATOR_CONF` | 默认 expandable segments；用于子进程，避免 1280 解码显存碎片 |
 | `ENABLE_WEBUI` / `TUNNEL` | 是否启动；`gradio`（默认）、`cloudflared`（备用）、`none`（仅容器内） |
+| `ENABLE_BACKUP_TUNNEL` | 默认 True；Cell 9 在 Gradio 主入口旁启动独立 cloudflared 结果找回入口；关闭 Web 或 `TUNNEL='none'` 时不启动 |
 | `WEB_REQUEST_TIMEOUT` | 每次 Web 推理上限，默认 5400 秒；传入 `SEETHROUGH_REQUEST_TIMEOUT`，超时终止该请求的 worker |
 | `WEB_DRAIN_GRACE` | 正常排空并完成输出交接后保留下载端点，默认 60 秒；传入 `SEETHROUGH_DRAIN_GRACE`，0 表示不额外等待 |
 | `WEB_SESSION_SECONDS` | Cell 9 为 CLI/Save & Run All 保活，默认 10800 秒（3h）；0 跳过，正常到期停止接单并排空当前请求 |
 | `PROCESS_STOP_TIMEOUT` | 中断/重跑时等待进程退出，默认 15 秒；给 app 默认 5 秒的 worker teardown 留出余量 |
 | `WEB_RESOLUTION` / `WEB_MAX_RESOLUTION` / `WEB_PORT` | Web 初始分辨率 / 滑块上限 / 服务端口；初始默认 1024，上限默认 2048，须 ≥512 且为 64 的倍数 |
-| `WORK_DIR` / `HF_HOME` / `DATASET_COPY_DIR` | 日志、模型缓存、Dataset 可写副本路径 |
+| `WORK_DIR` / `HF_HOME` / `DATASET_COPY_DIR` | 日志、模型缓存、Dataset 可写副本；Web 回执与完成的 PSD/gallery 保存在 `WORK_DIR/see-through-jobs` |
 | `ENV_DIR` | 干净的运行时 venv，默认 `/tmp/see-through-venv`；不继承系统 site-packages，不计入 notebook 输出归档 |
 | `BOOTSTRAP_PACKAGES` / `TORCH_PACKAGES` / `TORCH_INDEX_URL` | Kaggle 启动钩子依赖、固定 CUDA PyTorch/torchvision wheel、安装源；不安装未使用的 torchaudio |
 
-超时、轮询、显存/alpha 验收阈值、运行时依赖和 cloudflared 下载地址也集中在 Cell 2。修改服务配置后重跑 Cell 8，cloudflared 模式再重跑 Cell 9；启动格子会关闭旧服务，避免同端口与显存冲突。`ENABLE_WEBUI=False` 重跑 Cell 8 会关闭旧服务。
+超时、轮询、显存/alpha 验收阈值、运行时依赖和 cloudflared 下载地址也集中在 Cell 2。修改 Web 服务配置需在当前请求结束后重跑 Cell 8；这会关闭旧服务和当前 worker。Cell 9 在已有服务旁创建 cloudflared，不需要重新启动 Cell 8，但不要中断正在保活的 Cell 9 来改隧道：其中断清理也会关闭 Web。默认 Run All 会提前创建备用入口，主地址断线时使用已经输出的备用链接。`ENABLE_WEBUI=False` 重跑 Cell 8 会关闭旧服务。
 
 已有 Kaggle Notebook 的单元不会随 GitHub 更新自动替换。要使用新的默认 Web 流程，需重新导入更新后的 `.ipynb` 并恢复自己的 Cell 2 配置；仅在旧配置里添加 `RUN_BATCH=False` 不会跳过旧版未加开关的 Cell 5–7。正在运行的旧批处理可等待完成后再启动 Web；不要在批处理进程仍占 GPU 时另起 Web 推理。
+
+结果找回与默认备用入口还依赖新版 Cell 8 的 `SEETHROUGH_JOB_DIR` 和新版 Cell 9；请重新导入当前 notebook 并恢复自己的配置。只拉取 Python 文件不会替换已导入的旧单元，也不会更新正在运行的服务。
 
 批处理实际使用 `--quant_mode none --dtype fp16`，不需要 bitsandbytes。模型仓库中的 NF4 配置使用 bf16 compute，不适合直接在 T4 上跑。两张 16GB 卡不是一个 32GB 显存池；Web UI 只使用 GPU0。
 
@@ -45,6 +48,16 @@ Web 父进程仅负责队列、结果缓存与轻量监督；每个请求启动�
 身体采样、头部采样和 Marigold 深度采样分别显示真实的 `已完成步数 / 当前阶段总步数`，由每次 scheduler step 完成后回传，不按耗时推算。切换阶段时百分比会重新开始；它不是整次请求的总耗时百分比。加载模型、输入准备、解码／保存和 PSD 组装显示阶段文字，不伪造可量化进度。单个采样步内部没有更细的进度，较高分辨率下仍可能较久才更新一次。
 
 真实公网浏览器更新、PSD 基线一致性及验收范围见[验证记录](VALIDATION.md)。已有服务不会热更新：请等当前请求结束后重新拉取代码并重启 Web；仅刷新浏览器不会替换服务端 Python 进程。
+
+### 断连后的结果找回
+
+- Run 在开始长推理前创建请求 ID，显示在 `Request ID / recovery ID`，并写入当前 URL 的 `#request=...`。同一 URL 重新打开时会查询该请求；切换到另一公网域名时，复制 ID 到输入框后点 `Check status / retrieve saved result`。这个操作只读状态／提取结果，**不会重新提交推理**。计算中显示真实阶段与步数，需要稍后再次检查。
+- 使用 Gradio API 时，先调用 `create_request` 获取 ID，再将 ID 作为 `inference` 的第一个参数；每次新推理使用新 ID。同一 ID 不能重复开始；`recover_request` 只读取既有请求，不是重试接口。
+- 完成的 PSD 与 gallery 先移入 `WORK_DIR/see-through-jobs/<ID>/artifacts`，原子提交完成回执后才清理临时目录和交付网页。原图与中间文件不进入这份结果存储；Gradio 展示缓存仍按小时清理，找回操作可从独立存储重新建立缓存。保留范围受 Kaggle session、磁盘和保存方式约束；Save & Run All 保存的版本可能保留这些工作目录输出，并非永久存储或自动删除保证。
+- 重启 app 后，同一工作目录内的已完成结果仍可按 ID 读取；旧实例的运行中记录只会提示无法确认，不会自动续算。显式取消、请求超时、服务器退出或平台回收仍会终止计算。`Cancel this page's request` 仅取消当前页面提交的事件，不是重开页面后对历史任务的跨会话取消。
+- 请求 ID 不是用户鉴权；请勿同时公开 ID 和公网地址。没有针对敏感内容的访问控制，仍应遵守页面英文安全提示。
+- **cloudflared Quick Tunnel 不支持 SSE，也没有在线时长保证**，见 [Cloudflare 官方限制](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/#limitations)。备用入口用于短 HTTP 状态查询与文件下载，不能承诺重放原来的 Gradio 进度流。不要把备用链接启动成功当成长时间实时推理验收。
+
 
 
 ## 依赖隔离
@@ -78,6 +91,7 @@ STEPS = 30
 - [`inference/scripts/app_gradio.py`](../inference/scripts/app_gradio.py)：复用[作者维护的 Space 布局与流程](https://huggingface.co/spaces/24yearsold/see-through-demo/blob/main/app.py)，不依赖 `spaces.GPU`。
 - [`inference/scripts/inference_process.py`](../inference/scripts/inference_process.py)：轻量请求进程监督、超时与停止管理。
 - [`inference/scripts/inference_worker.py`](../inference/scripts/inference_worker.py)：每请求独立解释器入口，复用现有推理 API 并输出 PSD/gallery。
+- [`inference/scripts/inference_jobs.py`](../inference/scripts/inference_jobs.py)：无模型依赖的请求回执、状态转换与完成结果存储，不重试推理。
 
 上游推理修改集中在 [`inference_psd_quantized.py`](../inference/scripts/inference_psd_quantized.py) 的 dtype／混合精度边界与可选进度回调，以及 [`common/modules/layerdiffuse/diffusers_kdiffusion_sdxl.py`](../common/modules/layerdiffuse/diffusers_kdiffusion_sdxl.py)、[`common/modules/marigold/marigold_depth_pipeline.py`](../common/modules/marigold/marigold_depth_pipeline.py) 的采样步观察回调；[`inference_psd_blockswap.py`](../inference/scripts/inference_psd_blockswap.py) 的对应入口同步接受可选回调。回调只传 CPU 整数，不读取张量或主动同步 CUDA；未提供回调时维持原调用方式。默认 `bf16` 不变；已有 blockswap 调用不提供 dtype 字段时仍沿用 bf16。没有修改 `inference_psd.py` 或 annotators。
 
@@ -116,15 +130,15 @@ STEPS = 30
 - 数值异常：Cell 2 改 `DTYPE='fp32'`、`RESOLUTION=1024`，并建议设 `NUM_WORKERS=1`，Web 同时降 `WEB_RESOLUTION`。仍 OOM 时把 `RESOLUTION_DEPTH` 降到 512。不要改成 fp16 VAE，它更容易溢出。fp32 回退的完整 T4 实跑尚未验证。
 - 连续服务：历史长驻服务的 `KEEP_RESIDENT=True`／False 均未通过稳定性实测，该配置已删除。当前每请求进程隔离使成功、失败或超时的推理进程退出；OOM 后下一次请求使用新 worker，而非污染进程中的热重试。新架构有限序列验收通过，不表示单次峰值、任意输入质量或 PSD alpha／预览毛边已解决，详见[验证记录](VALIDATION.md)。
 - 依赖报错：确认错误来自 Cell 4 的独立环境，而不是基础 kernel 的旧安装日志；不要通过升级/降级系统包解决。运行时版本由 Cell 2 的 `TORCH_PACKAGES` 和精简 requirements 决定，修改后重跑 Cell 4。2026-10-27 的真实 Kaggle 验收已确认隔离环境 `pip check` 通过、CUDA 可用、基础环境包清单未变化。
-- 公网隧道：默认 Gradio `share=True` 使用出站 FRP 反代；失败时看 [Gradio 服务状态](https://status.gradio.app/)，改用 cloudflared quick tunnel。两种隧道都不可用时设 `TUNNEL='none'` 或关闭 Web UI，批处理不受影响。Kaggle 容器没有入站端口，不能从外部直连 7860。
-- 当前为无鉴权公网服务，上传图片及输出会暂存在 Kaggle。请勿上传敏感或未经授权的内容。`queue(max_size=16)` 只限制排队，不能防止滥用。下载输出缓存按小时清理，请及时保存。
+- 公网隧道：默认 Gradio `share=True` 使用出站 FRP；Cell 9 默认另开 cloudflared 结果找回入口。Gradio 断线不等于 worker 停止，不要重复点 Run；复制请求 ID 到备用页查询。备用创建失败会明确报错，并继续原 Gradio 的有界保活，不重启模型。Quick Tunnel 不支持 SSE，不能保证实时进度连接；两种入口都不可用时只能在 Kaggle 保存／下载工作目录中的已完成结果，或在当前请求结束后更换部署入口。Kaggle 容器不能从外部直连 7860。
+- 当前为无鉴权公网服务，请勿上传敏感或未经授权的内容；Web 页的自有安全提示与进度文字统一为英文。`queue(max_size=16)` 只限制排队，不能防止滥用。Gradio 缓存按小时清理；独立完成结果仍占用 Kaggle 工作盘，请及时下载并管理保存版本。
 - 服务随 session 结束；常见限制为 12h 上限、交互约 20 分钟空闲断开、免费 GPU 30h/周，以 [Kaggle 当前文档与账号额度](https://www.kaggle.com/docs/notebooks) 为准。外部访客请求不保证 session 保活。
 - 2026-10-26 实测环境为 Python 3.13、torch 2.11.0+cu128、Tesla T4×2：1280 / 30 steps，两图并行各生成 17 层 PSD；总耗时约 16.9 / 18.6 分钟，peak VRAM 均为 13.01 GiB，共享内存峰值约 29.04 GiB，OOM 计数 0。采用直接 fp16 加载、fp32 VAE、批处理关闭 group offload、expandable segments。这只是两张样例，不保证所有输入的耗时/峰值。
 - 首次模型下载约 8GB [INFERENCE]；`/kaggle/working` 保存空间约 20GB，留意模型缓存和 PSD 占用。长期在线服务应使用已有官方 HF Space，不依赖临时 Kaggle session。
 
 ## CLI 公网服务生命周期
 
-CLI / Save & Run All 会在 notebook 执行结束后释放 session，因此 Cell 9 除备用隧道外，也负责有上限的公网服务保活。默认 `WEB_SESSION_SECONDS=10800`（3h），避免旧 1h 默认在历史约 66.7 分钟的 2K 请求中途关闭；每次推理的 `WEB_REQUEST_TIMEOUT=5400` 映射为 `SEETHROUGH_REQUEST_TIMEOUT`。交互使用 Gradio 可只运行 Cell 8；cloudflared 还需运行 Cell 9。时长只改 Cell 2，仍受 Kaggle session 上限与 GPU 配额约束；设为 0 跳过保活。不要把 Gradio 日志中的“一周分享链接有效期”误当成 Kaggle 服务在线时长。
+CLI / Save & Run All 会在 notebook 执行结束后释放 session，因此 Cell 9 除备用隧道外，也负责有上限的公网服务保活。默认 `WEB_SESSION_SECONDS=10800`（3h），避免旧 1h 默认在历史约 66.7 分钟的 2K 请求中途关闭；每次推理的 `WEB_REQUEST_TIMEOUT=5400` 映射为 `SEETHROUGH_REQUEST_TIMEOUT`。交互 Gradio 可只运行 Cell 8；需要默认备用入口或显式 cloudflared 时再运行 Cell 9。时长只改 Cell 2，仍受 Kaggle session 上限与 GPU 配额约束；设为 0 跳过保活。不要把分享链接有效期误当成 Kaggle 在线时长，也不要为新增备用入口而中断正在运行的保活单元。
 
 正常保活到期时，Cell 9 发送 **SIGUSR1**：app 停止接收新工作，当前请求沿用已经开始的请求超时；完成 Gradio 输出交接后，再保留下载端点 `WEB_DRAIN_GRACE=60` 秒。notebook 保留隧道、持续转发日志，最多再等 `WEB_REQUEST_TIMEOUT + WEB_DRAIN_GRACE + PROCESS_STOP_TIMEOUT`（默认 5475 秒），然后必要时进入强制清理。这个等待不会重置当前请求计时，也不承诺完成队列中尚未开始的请求；下载宽限也不保证大文件一定传完。
 

@@ -324,3 +324,48 @@ LayerDiff 与 Marigold 的 scheduler loop 新增可选 CPU 整数回调；runner
 - [远端最终 verdict](../workspace/kaggle-progress-20261028T090221Z/remote-output/progress-verification/verdict.json)、[真实 worker 事件](../workspace/kaggle-progress-20261028T090221Z/remote-output/progress-verification/events.jsonl) 与同目录源码／模型 attestations、资源采样和服务日志
 - [浏览器实际步数记录](../workspace/kaggle-progress-20261028T090221Z/browser-progress.json)、[完成界面](../workspace/kaggle-progress-20261028T090221Z/browser-completed.png) 与[浏览器下载 PSD 的独立复核](../workspace/kaggle-progress-20261028T090221Z/browser-output-validation.json)
 - [自包含验证 notebook](../workspace/kaggle-progress-20261028T090221Z/see_through_progress.ipynb) 与 [CLI metadata](../workspace/kaggle-progress-20261028T090221Z/kernel-metadata.json)；测试公网链接已随正常关闭失效。
+
+## 2026-10-28：公网断连、请求 ID 与结果找回
+
+### 现场证据与不能推断的结论
+
+用户报告网页显示 `Connection to the server was lost. Attempting reconnection...`，但 Kaggle 继续推理，并提供 Kaggle notebook（远端版本标识已脱敏）。本轮只读拉取该 notebook 的当前源码、采集当前 session 的原生日志；日志显示请求为 **2048 / 30 steps / seed 42**，输入尺寸 1024×1536，身体采样已推进到 **18/30**。同期从外部读取主域名 `/gradio_api/app_id` 得到 HTTP 502，真实 Ego 浏览器打开首页也显示 **502 Bad Gateway**。具体公网域名仅保存在本机证据，不在正文公开。
+
+这证明公网访问失败与计算继续可以同时发生，不能单凭断连判定显存不足、精度异常或某一个确定网络跳点。额外 CPU 验证中，Gradio 中继还出现 TCP `connection refused`，无法生成主分享链接；cloudflared 则能建立独立入口。这是另一次独立连接观测，不冒充用户原 session 的中继日志。没有停止、重启、重新提交用户任务，也没有读取或重新上传其图片。
+
+Gradio 6.12 的该提示不能当作“原请求已经恢复”：前端会探测 app 身份并可能整页重载，队列 SSE 断开后也没有本集成可依赖的结果重放接口。重载后再点 Run 是新提交，不是找回原结果。本轮不盲目升级 Gradio、不伪造心跳，也不承诺第三方隧道永不断线。
+
+### 修复边界
+
+- Run 在长请求之前创建不可预测的请求 ID，写入回执与页面 URL fragment。找回操作使用短 HTTP 调用读取既有状态／完成结果，不进入推理队列、不自动重试、不恢复中止的模型计算。同一 ID 不能重复开始。
+- 完成的 PSD 与 gallery 先从临时目录移入 `WORK_DIR/see-through-jobs/<ID>/artifacts`，再原子提交完成回执；临时原图和中间文件仍清理。Gradio 缓存过期后可由独立存储重新建立展示缓存；保存范围仍受工作盘、session 与 notebook 输出保存方式约束。
+- 原有 worker 取消、超时和进程回收不改。落盘交接使用线程并等待取消期间的交接完成；网页交付失败不能把已完成的回执降级为失败。旧实例的运行中回执不被新 app 冒充为已恢复。
+- Cell 9 默认在 Gradio 旁建立 cloudflared 备用结果入口，不重启 Web 或 worker；备用创建失败会明确提示并继续原主服务的有界保活。`TUNNEL='none'` 和 `ENABLE_WEBUI=False` 不建立备用公网服务。中断正在保活的 Cell 9 仍会关闭服务，不能把它当作无损切换。
+- Web 自有安全提示和阶段名称改为英文。请求 ID 不是用户鉴权；不要公开 ID 与公网地址的组合。
+
+**重要限制：**[Cloudflare 官方明确说明 Quick Tunnel 不支持 SSE，也没有在线保证](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/#limitations)。因此备用入口定位为状态查询和文件下载，不承诺透明续接原 Gradio 进度流；一次短请求成功不能证明 65 分钟实时连接稳定。
+
+### 实际验证
+
+成功场景为 私有 Kaggle 验证 notebook（version 3），**CPU 实例，不使用 GPU、不导入 torch、不运行模型**。正式 app、结果存储和进程监督源码原样运行；测试把模型 worker 替换为受控 OS 文件导出进程，导出上一轮真实 GPU 生成的 PSD，18 张 PNG 由该 PSD 的真实像素图层提取。Cell 8 仅替换测试 launcher，Cell 9 执行正式代码。此夹具验证的是传输、生命周期与持久化，不是新一次图像推理或质量验收。
+
+从非 Kaggle Ego 浏览器通过 cloudflared 实际上传公开测试图并点 Run 一次，取得 ID；随后对该测试页注入离线、恢复网络并整页重载。重载后自动从 URL 找回运行中的请求；离线前、离线时和重载后的 worker PID 均为 **145**，成功场景全程只启动 **1** 个受控 worker。释放导出进程后，再打开不含 ID 的新 URL，手动输入原 ID，点击 `Check status / retrieve saved result`，看到 18 项 gallery 并实际下载 PSD；没有再次点击 Run。
+
+浏览器下载文件与远端持久化文件均为 SHA256 `410628fed43efe18607ac663deca5cb1f00b02a78ebd6c794addd4a160728440`，与输入的真实 PSD 夹具一致。这证明找回链路没有丢失／改写该文件，**不把夹具字节相同宣称为本轮新模型输出不变性**。服务与备用隧道正常退出，返回码均为 0；worker 已回收，Kaggle 最终 `COMPLETE`。本轮测试使用 300 秒保活和 90 秒下载宽限，产品默认仍为 3h／60 秒。
+
+本地 **19 项**回归通过（12 项回执／文件边界、7 项 OS 进程生命周期，5.560 秒）。另实际执行了：取消发生在真实 PSD 落盘交接期间仍保留完成文件；备用下载失败时本机 HTTP 主服务保持可达并正常排空；正式 Cell 8–9 的 `none` 模式只保留本机服务；关闭 Web 时不建立任何服务。它们不替代远端模型推理。
+
+远端逐文件校验 121 个冻结文件；当前 app、回执存储、监督、worker 与相应测试文件哈希均与实际远端相同，当前 notebook 的配置／启动／隧道可执行单元也一致，说明 Markdown 在验证后更新。六个推理核心／进程文件与上一轮真实 512 GPU 进度验收相同；本轮没有改模型数学、dtype、seed 或 offload，没有重跑 2048、完整 fp32 或长时间 SSE 稳定性测试。
+
+### 测试中发现的问题与使用要求
+
+首次 version 1 的采集器错误等待不存在的 Gradio 主链接，未提交任何请求，不计为通过。version 2 的离线重载暴露 JS-only load 未恢复 ID 的真实问题，已改为带后端的 `restore_request` 一次返回 ID、状态与结果；本机页面验证后在 version 3 通过。version 3 的手动输入自动化最初假定 DOM 有 id，改用实际 textarea 后继续同一个请求，没有重新提交计算。旧 Ego 空间消失后，经用户明确允许新建测试空间，完成后已关闭。
+
+新功能不能热修复旧实例。需要重新导入当前 `.ipynb`，保留自己的 Cell 2 配置，并在当前请求结束或明确决定放弃后启动新版。只更新 Python 文件不会改写旧 notebook 的环境变量／备用隧道单元。结果需要同一工作目录仍存在；Kaggle 版本保存可能继续保留输出，不能宣称自动清除或永久可取回。
+
+本机原始证据位于 [`workspace/kaggle-connection-20261028T100530Z`](../workspace/kaggle-connection-20261028T100530Z)：
+
+- [事件结论、源码哈希与边界](../workspace/kaggle-connection-20261028T100530Z/connection-diagnosis.json)、[用户主入口 502 截图](../workspace/kaggle-connection-20261028T100530Z/user-public-502.png)、原生日志 `user-live-log.jsonl`
+- [浏览器离线／重载／手动找回记录](../workspace/kaggle-connection-20261028T100530Z/browser-reconnection-v3.json)、[找回运行状态](../workspace/kaggle-connection-20261028T100530Z/browser-recovered-running-v3.png)、[完成结果与下载界面](../workspace/kaggle-connection-20261028T100530Z/browser-recovered-completed-v3.png)、[英文提示](../workspace/kaggle-connection-20261028T100530Z/english-notice-ui.png)
+- [远端最终 verdict](../workspace/kaggle-connection-20261028T100530Z/remote-output/connection-verification/verdict.json)、同目录源码 attestations／状态采样，及 `remote-output/see-through-jobs/` 的实际保存文件与回执
+- [取消／备用失败／私有模式 smoke](../workspace/kaggle-connection-20261028T100530Z/storage-failure-smoke.json)、[可重放 CPU notebook](../workspace/kaggle-connection-20261028T100530Z/see_through_connection.ipynb) 与 CLI metadata；测试链接已随正常关闭失效。
