@@ -26,7 +26,7 @@
 | `WEB_DRAIN_GRACE` | 正常排空并完成输出交接后保留下载端点，默认 60 秒；传入 `SEETHROUGH_DRAIN_GRACE`，0 表示不额外等待 |
 | `WEB_SESSION_SECONDS` | Cell 9 为 CLI/Save & Run All 保活，默认 10800 秒（3h）；0 跳过，正常到期停止接单并排空当前请求 |
 | `PROCESS_STOP_TIMEOUT` | 中断/重跑时等待进程退出，默认 15 秒；给 app 默认 5 秒的 worker teardown 留出余量 |
-| `WEB_RESOLUTION` / `WEB_MAX_RESOLUTION` / `WEB_PORT` | Web 初始分辨率 / 滑块上限 / 服务端口；上限默认 1536，须 ≥512 且为 64 的倍数 |
+| `WEB_RESOLUTION` / `WEB_MAX_RESOLUTION` / `WEB_PORT` | Web 初始分辨率 / 滑块上限 / 服务端口；初始默认 1024，上限默认 2048，须 ≥512 且为 64 的倍数 |
 | `WORK_DIR` / `HF_HOME` / `DATASET_COPY_DIR` | 日志、模型缓存、Dataset 可写副本路径 |
 | `ENV_DIR` | 干净的运行时 venv，默认 `/tmp/see-through-venv`；不继承系统 site-packages，不计入 notebook 输出归档 |
 | `BOOTSTRAP_PACKAGES` / `TORCH_PACKAGES` / `TORCH_INDEX_URL` | Kaggle 启动钩子依赖、固定 CUDA PyTorch/torchvision wheel、安装源；不安装未使用的 torchaudio |
@@ -49,7 +49,7 @@ Cell 4 自动执行目标环境的 `pip check`，期望输出 `No broken require
 
 这里没有 Hugging Face Space 的 `spaces.GPU` 限制，但仍受单张 T4 的显存、Kaggle 主机内存和 session 时长约束。两张 T4 用于两张图片并行，不能把同一张图片当作 32GB 显存来推理。
 
-Web 初始分辨率保留 1024；滑块上限由 `WEB_MAX_RESOLUTION=1536` 控制，不再固定 1280，也不会在后端偷偷降回 1280。独立运行 app 时对应环境变量为 `SEETHROUGH_MAX_RESOLUTION`。要复现已经重复跑通的 2048 路径，在 Cell 2 设置：
+Web 初始分辨率保留 1024；滑块上限默认 `WEB_MAX_RESOLUTION=2048`，不会在后端偷偷降回 1280。Notebook 将此上限通过 `SEETHROUGH_MAX_RESOLUTION` 传入 app；单独运行 app 时需自行设置该环境变量，未设置时 app 自身的回退上限仍为 1536。若希望页面打开时直接选择已经重复跑通的 2048 路径，在 Cell 2 设置：
 
 ```python
 WEB_MAX_RESOLUTION = 2048
@@ -57,7 +57,7 @@ WEB_RESOLUTION = 2048
 STEPS = 30
 ```
 
-10 steps 只适合链路冒烟，不能据其结果判断高分辨率质量；减少 steps 主要缩短耗时，不能保证解决峰值显存不足。当前 worker 在 LayerDiff 与 Marigold 之间释放管线，每次请求结束后退出。新隔离服务两次 2048 / 30 steps 均成功，约 65 分钟／次，PSD 与修复前成功结果逐字节相同；2560 仍发生真实 CUDA OOM，随后新 worker 的 1536 请求成功。旧长驻服务连续请求曾因宿主空闲堆滞留而 OOM kill，且 CUDA OOM 后同进程降分辨率未恢复；不要混用两版结论。方法、原始数据与边界见[推理验证记录](VALIDATION.md)。默认上限仍保留 1536；逐请求隔离不是单次峰值或长期稳定保证，不要同时启动双 worker 批处理。
+10 steps 只适合链路冒烟，不能据其结果判断高分辨率质量；减少 steps 主要缩短耗时，不能保证解决峰值显存不足。当前 worker 在 LayerDiff 与 Marigold 之间释放管线，每次请求结束后退出。新隔离服务两次 2048 / 30 steps 均成功，约 65 分钟／次，PSD 与修复前成功结果逐字节相同；2560 仍发生真实 CUDA OOM，随后新 worker 的 1536 请求成功。旧长驻服务连续请求曾因宿主空闲堆滞留而 OOM kill，且 CUDA OOM 后同进程降分辨率未恢复；不要混用两版结论。方法、原始数据与边界见[推理验证记录](VALIDATION.md)。Notebook 默认上限已调整为 2048，但逐请求隔离不是单次峰值或长期稳定保证，不要同时启动双 worker 批处理。
 
 ## 文件归属与冲突面
 

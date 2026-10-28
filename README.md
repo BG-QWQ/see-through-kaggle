@@ -87,7 +87,7 @@ runs one batch worker per GPU, exports PSDs,
 and provides an official-Space-derived Gradio UI with a temporary public share link
 (cloudflared fallback). T4 inference uses `--quant_mode none --dtype fp16` with fp32 VAEs;
 the CLI's default dtype remains bf16. Batch workers and the Web UI must not run together.
-The Web resolution ceiling is configurable with `WEB_MAX_RESOLUTION` (default 1536);
+The Web resolution ceiling is configurable with `WEB_MAX_RESOLUTION` (default 2048);
 each image still uses one GPU, not pooled T4 memory.
 See [`kaggle/README.md`](kaggle/README.md) for CLI submission, verification, platform limits,
 and the upstream synchronization checklist.
