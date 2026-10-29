@@ -63,7 +63,7 @@ def _snapshot_gallery(saved_dir, job_dir):
             continue
         destination = gallery_dir / image_path.name
         shutil.copyfile(image_path, destination)
-        gallery.append({"path": destination.relative_to(job_dir).as_posix(), "label": tag})
+        gallery.append({"path": destination.relative_to(job_dir).as_posix(), "label": f"Raw: {tag}"})
     return gallery
 
 
@@ -85,6 +85,7 @@ def _run_request(job_dir):
     script_dir = Path(__file__).resolve().parent
     root = script_dir.parent.parent
     sys.path.append(str(script_dir.parent))
+    sys.path.insert(0, str(root))
     sys.path.insert(0, str(root / "common"))
     sys.path.insert(0, str(script_dir))
 
@@ -114,7 +115,14 @@ def _run_request(job_dir):
     steps = int(request["steps"])
     resolution = int(request["resolution"])
 
+    cleanup = None
+    if request.get("clean_background", True):
+        from utils.background_cleanup import BackgroundCleanup
+        cleanup = BackgroundCleanup(input_path, progress_callback=_report_progress)
+        cleanup.prepare()
+
     seed_everything(seed)
+    _report_progress("loading_layerdiff")
     layerdiff_pipe = build_layerdiff_pipeline(args)
     run_layerdiff(
         layerdiff_pipe, str(input_path), str(job_dir), seed, steps, resolution,
@@ -135,16 +143,24 @@ def _run_request(job_dir):
     torch.cuda.empty_cache()
 
     saved_dir = job_dir / "input"
-    gallery = _snapshot_gallery(saved_dir, job_dir)
+    raw_gallery = _snapshot_gallery(saved_dir, job_dir)
     _report_progress("psd")
-    further_extr(
+    previews = further_extr(
         str(saved_dir), rotate=False, save_to_psd=True,
-        tblr_split=request["tblr_split"],
+        tblr_split=request["tblr_split"], background_cleanup=cleanup,
+        preview_dir=str(job_dir / "psd-layers"),
     )
+    gallery = [
+        {"path": Path(path).relative_to(job_dir).as_posix(), "label": f"PSD: {tag}"}
+        for path, tag in previews
+    ] + raw_gallery
     psd_path = job_dir / "input.psd"
     if not psd_path.is_file() or psd_path.stat().st_size == 0:
         raise RuntimeError("PSD generation failed — no output file produced.")
-    return {"status": "completed", "psd": "input.psd", "gallery": gallery}
+    return {
+        "status": "completed", "psd": "input.psd", "gallery": gallery,
+        "background_cleanup": cleanup.report if cleanup is not None else {"enabled": False},
+    }
 
 
 def main():

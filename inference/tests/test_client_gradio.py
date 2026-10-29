@@ -1,6 +1,8 @@
 """Consumer regressions for non-replaying submissions and atomic PSD retrieval."""
 
 import hashlib
+from contextlib import redirect_stderr, redirect_stdout
+import io
 import json
 from pathlib import Path
 import ssl
@@ -14,7 +16,7 @@ import httpx
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 from client_gradio import (ArtifactError, RequestStateError, SeeThroughClient,
-                           SeeThroughError, SubmissionUncertain, WaitTimeout)
+                           SeeThroughError, SubmissionUncertain, WaitTimeout, main)
 
 
 class InterruptedBody(httpx.SyncByteStream):
@@ -27,7 +29,7 @@ class ClientGradioTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.payload = b"verified PSD content"
         self.request_id = "a" * 32
         self.metadata = {
@@ -168,10 +170,11 @@ class ClientGradioTests(unittest.TestCase):
                             raise httpx.ConnectError("TLS handshake failed") from cause
 
                     client = self.client(handler, backup_url="https://backup.test")
-                    with self.assertRaises(httpx.HTTPError):
-                        if operation == "snapshot":
+                    if operation == "snapshot":
+                        with self.assertRaises(httpx.HTTPError):
                             client.snapshot(self.request_id)
-                        else:
+                    else:
+                        with self.assertRaises(httpx.HTTPError):
                             client.download(self.request_id, self.root)
                     self.assertEqual(failures, ["primary.test"])
                     if operation == "download":
@@ -304,21 +307,130 @@ class ClientGradioTests(unittest.TestCase):
             return httpx.Response(200, json={"data": [{"request_id": self.request_id, "state": "running"}]})
 
         client = self.client(handler)
-        clock = [0]
         original_handler = handler
 
         def slow_status(request):
             response = original_handler(request)
-            clock[0] = 2
+            clock.return_value = 2
             return response
 
         client._http.close()
         client._http = httpx.Client(transport=httpx.MockTransport(slow_status))
-        with patch("client_gradio.time.monotonic", new=lambda: clock[0]):
+        with patch("client_gradio.time.monotonic", return_value=0) as clock:
             with self.assertRaises(WaitTimeout) as caught:
                 client.wait(self.request_id, timeout=1)
         self.assertEqual(caught.exception.request_id, self.request_id)
         self.assertEqual(operations, ["/gradio_api/run/request_snapshot"])
+
+    def test_receipt_boundary_rejects_invalid_ids_without_touching_outside_files(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        sentinel = outside / "request.json"
+        sentinel.write_bytes(b"outside receipt")
+        output = self.root / "outputs"
+        client = self.client(lambda request: self.fail("Unexpected transport"))
+        for request_id in ("../outside", str(outside), ".", "a" * 31, "A" * 32):
+            with self.subTest(request_id=request_id):
+                with self.assertRaises(SeeThroughError):
+                    client._receipt(request_id, output)
+                with self.assertRaises(SeeThroughError):
+                    client.download(request_id, output)
+        self.assertEqual(sentinel.read_bytes(), b"outside receipt")
+        self.assertFalse(output.exists())
+
+    def test_request_directory_symlink_cannot_read_or_write_outside_root(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        receipt = outside / "request.json"
+        receipt.write_bytes(b"outside receipt")
+        artifact = outside / "input.psd"
+        artifact.write_bytes(b"outside PSD")
+        output = self.root / "outputs"
+        output.mkdir()
+        (output / self.request_id).symlink_to(outside, target_is_directory=True)
+        client = self.client(lambda request: self.fail("Unexpected transport"))
+        with self.assertRaises(SeeThroughError):
+            client.download(self.request_id, output)
+        with self.assertRaises(SeeThroughError):
+            client._receipt(self.request_id, output, self.metadata)
+        self.assertEqual(receipt.read_bytes(), b"outside receipt")
+        self.assertEqual(artifact.read_bytes(), b"outside PSD")
+        self.assertEqual(sorted(path.name for path in outside.iterdir()), ["input.psd", "request.json"])
+
+    def test_receipt_and_artifact_symlinks_are_rejected_before_transport(self):
+        outside = self.root / "sentinel"
+        outside.write_bytes(b"do not read or replace")
+        directory = self.root / self.request_id
+        directory.mkdir()
+        client = self.client(lambda request: self.fail("Unexpected transport"))
+        for name in ("request.json", "input.psd"):
+            for dangling in (False, True):
+                with self.subTest(name=name, dangling=dangling):
+                    target = self.root / "absent" if dangling else outside
+                    link = directory / name
+                    link.symlink_to(target)
+                    with self.assertRaises(SeeThroughError):
+                        client.download(self.request_id, self.root)
+                    with self.assertRaises(SeeThroughError):
+                        client._receipt(self.request_id, self.root, self.metadata)
+                    self.assertTrue(link.is_symlink())
+                    self.assertEqual(outside.read_bytes(), b"do not read or replace")
+                    self.assertFalse((self.root / "absent").exists())
+                    link.unlink()
+
+    def test_artifact_symlink_created_during_download_cannot_replace_outside_file(self):
+        sentinel = self.root / "sentinel"
+        sentinel.write_bytes(b"outside PSD")
+        target = self.root / self.request_id / "input.psd"
+
+        def handler(request):
+            if request.method == "POST":
+                return self.completed()
+            target.symlink_to(sentinel)
+            return httpx.Response(200, content=self.payload)
+
+        client = self.client(handler)
+        with self.assertRaises(SeeThroughError):
+            client.download(self.request_id, self.root)
+        self.assertTrue(target.is_symlink())
+        self.assertEqual(sentinel.read_bytes(), b"outside PSD")
+        self.assert_no_partials()
+
+    def test_cli_rejects_escaping_output_before_constructing_transport(self):
+        project = self.root / "project"
+        project.mkdir()
+        outside = self.root / "outside"
+        outside.mkdir()
+        sentinel = outside / "sentinel"
+        sentinel.write_bytes(b"unchanged")
+        link = project / "linked-output"
+        link.symlink_to(outside, target_is_directory=True)
+        outputs = (outside, project / ".." / "outside", link, "../outside")
+        for command in ("run", "recover"):
+            for output in outputs:
+                with self.subTest(command=command, output=output):
+                    argument = "image.png" if command == "run" else self.request_id
+                    with patch("client_gradio.os.getcwd", return_value=str(project)):
+                        with patch("client_gradio.SeeThroughClient") as transport:
+                            with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+                                result = main([command, "https://primary.test", argument, "--output", str(output)])
+                    self.assertEqual(result, 1)
+                    transport.assert_not_called()
+                    self.assertEqual(sentinel.read_bytes(), b"unchanged")
+                    self.assertEqual(list(outside.iterdir()), [sentinel])
+
+    def test_library_keeps_explicit_custom_output_root(self):
+        custom = self.root / "custom-output"
+
+        def handler(request):
+            if request.method == "POST":
+                return self.completed()
+            return httpx.Response(200, content=self.payload)
+
+        client = self.client(handler)
+        target = client.download(self.request_id, custom)
+        self.assertEqual(target, custom / self.request_id / "input.psd")
+        self.assertEqual(target.read_bytes(), self.payload)
 
 
 if __name__ == "__main__":

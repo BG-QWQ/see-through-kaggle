@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import sys
 import tempfile
@@ -41,6 +42,8 @@ _JOBS = JobStore(os.environ.get("SEETHROUGH_JOB_DIR", str(Path(tempfile.gettempd
 
 _PHASE_LABELS = {
     "loading_layerdiff": "Loading LayerDiff model",
+    "background_cleanup_prepare": "Preparing foreground guide",
+    "background_cleanup_layers": "Cleaning layer backgrounds",
     "body_prepare": "Preparing body layers",
     "body": "LayerDiff · Body sampling",
     "body_decode": "Decoding and saving body layers",
@@ -79,9 +82,29 @@ def _saved_outputs(request_id, record):
     )
 
 
-def recover_request(request_id):
+def _completed_status(record, lead):
+    cleanup = record.get("result", {}).get("background_cleanup")
+    if cleanup is None:
+        return lead
+    if cleanup.get("enabled"):
+        changed = sum(bool(layer.get("changed")) for layer in cleanup.get("layers", []))
+        lead += f" Background cleanup updated {changed} layer(s)."
+        unresolved = len(cleanup.get("kept_unresolved", []))
+        if unresolved:
+            lead += f" {unresolved} uncertain layer(s) were kept unchanged."
+    else:
+        lead += " Background cleanup was disabled."
+    return lead + " PSD previews and raw model PNGs are included."
+
+
+def recover_request(request_id: str) -> tuple:
+    request_id = (request_id or "").strip()
     if not request_id:
         return "Run creates a request ID before inference. Keep it to retrieve results after a disconnection.", None, []
+    if re.fullmatch(r"[0-9a-f]{1,31}", request_id):
+        return "Incomplete request ID. Enter all 32 lowercase hexadecimal characters; recovery does not start inference.", None, []
+    if re.fullmatch(r"[0-9a-f]{32}", request_id) is None:
+        return "Invalid request ID. Paste only the 32 lowercase hexadecimal characters, not a URL or other text.", None, []
     try:
         record = _JOBS.get(request_id)
     except ValueError as error:
@@ -91,7 +114,7 @@ def recover_request(request_id):
     state = record["state"]
     if state == "completed":
         output_path, gallery = _saved_outputs(request_id, record)
-        return "Completed. Saved results retrieved without running inference again.", output_path, gallery
+        return _completed_status(record, "Completed. Saved results retrieved without running inference again."), output_path, gallery
     if state == "running":
         if record["owner"] != _JOBS.instance_id:
             return "This request belongs to another server instance. Check Kaggle logs; its current state cannot be confirmed here. Do not resubmit automatically.", None, []
@@ -133,10 +156,13 @@ def request_snapshot(request_id: str) -> dict:
                 digest.update(chunk)
                 size += len(chunk)
         snapshot["psd"] = {"path": cached, "size": size, "sha256": digest.hexdigest()}
+        if "background_cleanup" in record["result"]:
+            snapshot["background_cleanup"] = record["result"]["background_cleanup"]
     return snapshot
 
 
-def restore_request(request_id):
+def restore_request(request_id: str) -> tuple:
+    request_id = (request_id or "").strip()
     return request_id, *recover_request(request_id)
 
 
@@ -146,11 +172,13 @@ def cancel_queued_request(request_id):
 
 
 async def inference(request_id: str, image: Image.Image, resolution: int = 1024, seed: int = 42,
-                    tblr_split: bool = False, steps: int = 30, progress=gr.Progress()):
+                    tblr_split: bool = False, steps: int = 30, clean_background: bool = True,
+                    progress=gr.Progress()):
     started = time.monotonic()
     try:
         _JOBS.start(request_id, {
             "resolution": resolution, "seed": seed, "steps": steps, "tblr_split": bool(tblr_split),
+            "clean_background": bool(clean_background),
         })
     except (ValueError, KeyError) as error:
         raise gr.Error(str(error)) from None
@@ -177,6 +205,7 @@ async def inference(request_id: str, image: Image.Image, resolution: int = 1024,
             (job_dir / "request.json").write_text(json.dumps({
                 "dtype": DTYPE, "resolution": resolution, "seed": seed, "steps": steps,
                 "depth_resolution": DEPTH_RESOLUTION, "tblr_split": bool(tblr_split),
+                "clean_background": bool(clean_background),
             }), encoding="utf-8")
             progress(None, desc="Starting isolated inference worker")
             result = await _WORKER.run(job_dir, on_progress=update_progress)
@@ -184,7 +213,7 @@ async def inference(request_id: str, image: Image.Image, resolution: int = 1024,
         output_path, gallery = await asyncio.to_thread(_saved_outputs, request_id, record)
         progress(1.0, desc="Complete")
         _log(f"Request {request_id}: Total inference time: {time.monotonic() - started:.1f}s")
-        return output_path, gallery, "Completed. Results saved; keep the request ID to retrieve them again."
+        return output_path, gallery, _completed_status(record, "Completed. Results saved; keep the request ID to retrieve them again.")
     except asyncio.CancelledError:
         _JOBS.fail(request_id, "cancelled", "Request cancelled; the inference worker has been reaped.")
         _log("Request cancelled; inference worker has been reaped.")
@@ -218,7 +247,7 @@ with gr.Blocks(title="See-through: Layer Decomposition", delete_cache=(3600, 360
     )
     with gr.Row():
         with gr.Column(scale=1):
-            input_image = gr.Image(type="pil", label="Upload image (non-square images will be padded)")
+            input_image = gr.Image(type="pil", image_mode="RGBA", label="Upload image (non-square images will be padded)")
             resolution = gr.Slider(
                 minimum=512, maximum=MAX_RESOLUTION,
                 value=int(os.environ.get("SEETHROUGH_RESOLUTION", 1024)), step=64,
@@ -234,12 +263,17 @@ with gr.Blocks(title="See-through: Layer Decomposition", delete_cache=(3600, 360
                 label="Split arms, eyes and ears into left/right layers",
                 info="Gives the arms, eyes and ears separate left and right layers. Legs are not split, and a part stays whole if its left and right sides touch.",
             )
+            clean_background = gr.Checkbox(
+                value=True,
+                label="Clean background leakage in PSD layers",
+                info="Refines only layers with substantial leakage. Raw PNGs are kept; this is not exact alpha matting.",
+            )
             with gr.Row():
                 run_btn = gr.Button("Run", variant="primary")
                 cancel_btn = gr.Button("Cancel this page's request")
         with gr.Column(scale=2):
             psd_output = gr.File(label="Download layered PSD")
-            gallery_output = gr.Gallery(label="Separated layers", columns=4, height="auto")
+            gallery_output = gr.Gallery(label="PSD layers and raw model PNGs", columns=4, height="auto")
     request_id = gr.Textbox(
         label="Request ID / recovery ID",
         info="Kept in this URL's fragment. Copy the ID before switching to a backup URL.",
@@ -252,7 +286,7 @@ with gr.Blocks(title="See-through: Layer Decomposition", delete_cache=(3600, 360
 
     run_event = run_btn.click(fn=create_request, outputs=[request_id], queue=False).success(
         fn=inference,
-        inputs=[request_id, input_image, resolution, seed, tblr_split, steps],
+        inputs=[request_id, input_image, resolution, seed, tblr_split, steps, clean_background],
         outputs=[psd_output, gallery_output, request_status],
         concurrency_limit=1,
     )
@@ -264,6 +298,7 @@ with gr.Blocks(title="See-through: Layer Decomposition", delete_cache=(3600, 360
     request_id.change(
         fn=None, inputs=[request_id], outputs=[], queue=False,
         js="""(id) => {
+            id = (id || "").trim();
             const params = new URLSearchParams(window.location.hash.slice(1));
             if (id) params.set("request", id); else params.delete("request");
             const hash = params.toString();
@@ -273,7 +308,8 @@ with gr.Blocks(title="See-through: Layer Decomposition", delete_cache=(3600, 360
     )
     demo.load(
         fn=restore_request, inputs=[request_id],
-        outputs=[request_id, request_status, psd_output, gallery_output], queue=False,
+        outputs=[request_id, request_status, psd_output, gallery_output],
+        queue=False,
         js="() => [new URLSearchParams(window.location.hash.slice(1)).get('request') || '']",
     )
     gr.Examples(

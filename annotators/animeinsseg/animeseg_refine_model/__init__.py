@@ -14,10 +14,11 @@ except:
     AnimeSegmentationCLS = torch.nn.Module
 
 from .isnet import ISNetDIS, ISNetGTEncoder
-from utils.torch_utils import init_model_from_pretrained
 
 
 def load_refinenet(refine_method = 'refinenet_isnet', device: str = 'cuda'):
+    from utils.torch_utils import init_model_from_pretrained
+
     if refine_method == 'animeseg':
         def _patch_statedict(model, state_dict):
             klist = list(state_dict.keys())

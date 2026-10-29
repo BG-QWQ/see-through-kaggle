@@ -73,21 +73,23 @@ def build_layerdiff_pipeline(args):
         unet = UNetFrameConditionModel.from_pretrained(repo, subfolder='unet', **model_kwargs)
         pipeline = KDiffusionStableDiffusionXLPipeline.from_pretrained(
             repo, trans_vae=trans_vae, unet=unet, scheduler=None, **pipeline_kwargs)
+        pipeline.vae.to(dtype=vae_dtype)
+        pipeline.trans_vae.to(dtype=vae_dtype)
+        pipeline.unet.to(dtype=compute_dtype)
+        pipeline.text_encoder.to(dtype=compute_dtype)
+        pipeline.text_encoder_2.to(dtype=compute_dtype)
+        # Only the UNet needs to stay on CPU until offload hooks are installed.
         if args.cpu_offload:
-            pipeline.vae.to(dtype=vae_dtype)
-            pipeline.trans_vae.to(dtype=vae_dtype)
-            pipeline.unet.to(dtype=compute_dtype)
-            pipeline.text_encoder.to(dtype=compute_dtype)
-            pipeline.text_encoder_2.to(dtype=compute_dtype)
             pipeline.enable_model_cpu_offload()
+        elif getattr(args, 'group_offload', False):
+            # Preserve CUDA placement for the custom VAE's direct submodule calls.
+            pipeline.vae.to(device='cuda')
+            pipeline.trans_vae.to(device='cuda')
+            pipeline.text_encoder.to(device='cuda')
+            pipeline.text_encoder_2.to(device='cuda')
+            pipeline.enable_group_offload('cuda', num_blocks_per_group=1)
         else:
-            pipeline.vae.to(dtype=vae_dtype, device='cuda')
-            pipeline.trans_vae.to(dtype=vae_dtype, device='cuda')
-            pipeline.unet.to(dtype=compute_dtype, device='cuda')
-            pipeline.text_encoder.to(dtype=compute_dtype, device='cuda')
-            pipeline.text_encoder_2.to(dtype=compute_dtype, device='cuda')
-            if getattr(args, 'group_offload', False):
-                pipeline.enable_group_offload('cuda', num_blocks_per_group=1)
+            pipeline.to(device='cuda')
         # Cache tag embeddings and unload text encoders to save VRAM
         pipeline.cache_tag_embeds()
     else:
@@ -140,15 +142,16 @@ def build_marigold_pipeline(args):
         marigold_pipe = pipeline_cls.from_pretrained(repo, unet=unet, **pipeline_kwargs)
         # Mixed components were loaded in their final dtype; never round the VAE via fp16.
         pipeline_dtype = compute_dtype if compute_dtype == vae_dtype else None
+        marigold_pipe.to(dtype=pipeline_dtype)
+        marigold_pipe.vae.to(dtype=vae_dtype)
         if args.cpu_offload:
-            marigold_pipe.to(dtype=pipeline_dtype)
-            marigold_pipe.vae.to(dtype=vae_dtype)
             marigold_pipe.enable_model_cpu_offload()
+        elif getattr(args, 'group_offload', False):
+            marigold_pipe.vae.to(device='cuda')
+            marigold_pipe.text_encoder.to(device='cuda')
+            marigold_pipe.enable_group_offload('cuda', num_blocks_per_group=1)
         else:
-            marigold_pipe.to(device='cuda', dtype=pipeline_dtype)
-            marigold_pipe.vae.to(dtype=vae_dtype)
-            if getattr(args, 'group_offload', False):
-                marigold_pipe.enable_group_offload('cuda', num_blocks_per_group=1)
+            marigold_pipe.to(device='cuda')
         marigold_pipe.cache_tag_embeds()
     else:
         # NF4: load from pre-quantized repo (auto-selected by REPO_MAP)

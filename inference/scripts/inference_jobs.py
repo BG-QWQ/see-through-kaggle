@@ -139,6 +139,8 @@ class JobStore:
                     for item in result["gallery"]
                 ],
             }
+            if "background_cleanup" in result:
+                saved_result["background_cleanup"] = result["background_cleanup"]
             # Preflight every path before moving any output. Originals and worker
             # intermediates never enter persistent storage.
             for source, destination in moves.values():

@@ -18,6 +18,8 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
+_RECEIPT_FILE = "request.json"
+
 
 class SeeThroughError(RuntimeError):
     """An invalid service response or an unsuccessful request."""
@@ -81,6 +83,35 @@ def _request_id(value):
     if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{32}", value) is None:
         raise SeeThroughError("Invalid request ID")
     return value
+
+
+def _cli_output(value):
+    # CLI arguments are untrusted; the caller's working directory is the boundary.
+    root = Path.cwd().resolve()
+    output = Path(value).resolve()
+    if not output.is_relative_to(root):
+        raise ValueError("CLI output must stay within the current working directory")
+    return output
+
+
+def _local_path(directory, name):
+    path = directory / name
+    if path.is_symlink() or not path.resolve().is_relative_to(directory):
+        raise SeeThroughError("Local output must not escape its directory or use symlinks")
+    return path
+
+
+def _request_directory(output_dir, request_id, *, create=False):
+    request_id = _request_id(request_id)
+    # Library callers explicitly select their trusted root, including custom roots.
+    root = Path(output_dir).resolve()
+    directory = _local_path(root, request_id)
+    if create:
+        directory.mkdir(parents=True, exist_ok=True)
+    # Validate both children before reading a receipt or updating either output.
+    _local_path(directory, _RECEIPT_FILE)
+    _local_path(directory, "input.psd")
+    return directory
 
 
 def _certificate_failure(exc):
@@ -157,16 +188,15 @@ class SeeThroughClient:
         return body["data"][0]
 
     def _receipt(self, request_id, output_dir, metadata=None, *, initial=False):
-        directory = Path(output_dir) / request_id
-        directory.mkdir(parents=True, exist_ok=True)
-        target = directory / "request.json"
+        directory = _request_directory(output_dir, request_id, create=True)
+        target = _local_path(directory, _RECEIPT_FILE)
         record = {"request_id": request_id, "base_url": self.base_url}
         if self.backup_url:
             record["backup_url"] = self.backup_url
         if metadata is not None:
             record["psd"] = metadata
         if initial:
-            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
                 json.dump(record, stream)
                 stream.flush()
@@ -178,17 +208,21 @@ class SeeThroughClient:
                     json.dump(record, stream)
                     stream.flush()
                     os.fsync(stream.fileno())
+                _request_directory(output_dir, request_id)
                 os.replace(temporary, target)
             finally:
                 Path(temporary).unlink(missing_ok=True)
         return directory
 
-    def start(self, image_path, output_dir, resolution=1024, seed=42, steps=30, tblr_split=False):
+    def start(self, image_path, output_dir, resolution=1024, seed=42, steps=30,
+              tblr_split=False, clean_background=True):
         _integer(resolution, "resolution")
         _integer(seed, "seed", minimum=0)
         _integer(steps, "steps")
         if not isinstance(tblr_split, bool):
             raise ValueError("tblr_split must be boolean")
+        if not isinstance(clean_background, bool):
+            raise ValueError("clean_background must be boolean")
         image_path = Path(image_path)
 
         def upload(base):
@@ -209,7 +243,7 @@ class SeeThroughClient:
         try:
             response = self._http.post(self.base_url + "/gradio_api/call/inference", json={"data": [
                 request_id, {"path": uploaded_path, "orig_name": image_path.name, "meta": {"_type": "gradio.FileData"}},
-                resolution, seed, tblr_split, steps,
+                resolution, seed, tblr_split, steps, clean_background,
             ]})
             response.raise_for_status()
             body = response.json()
@@ -262,57 +296,73 @@ class SeeThroughClient:
                 raise WaitTimeout(request_id)
             time.sleep(min(poll_interval, remaining))
 
-    def download(self, request_id, output_dir):
-        request_id = _request_id(request_id)
-        directory = Path(output_dir) / request_id
-        receipt = directory / "request.json"
-        if receipt.exists():
-            saved = json.loads(receipt.read_text(encoding="utf-8"))
-            if not isinstance(saved, dict) or saved.get("request_id") != request_id:
-                raise SeeThroughError("Local receipt does not match the requested ID")
-            if "psd" in saved:
-                self._pin(request_id, _psd(saved))
+    def _load_receipt(self, request_id, directory):
+        receipt = _local_path(directory, _RECEIPT_FILE)
+        if not receipt.exists():
+            return
+        descriptor = os.open(receipt, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, encoding="utf-8") as stream:
+            saved = json.load(stream)
+        if not isinstance(saved, dict) or saved.get("request_id") != request_id:
+            raise SeeThroughError("Local receipt does not match the requested ID")
+        if "psd" in saved:
+            self._pin(request_id, _psd(saved))
+
+    def _completed_metadata(self, request_id):
         result = self.snapshot(request_id)
         self._terminal(result)
         if result["state"] != "completed":
             raise RequestStateError(request_id, result["state"], "PSD is not ready")
-        metadata = _psd(result)
+        return _psd(result)
+
+    @staticmethod
+    def _write_verified(response, stream, metadata):
+        response.raise_for_status()
+        digest = hashlib.sha256()
+        size = 0
+        for chunk in response.iter_bytes():
+            size += len(chunk)
+            if size > metadata["size"]:
+                raise _CorruptDownload("PSD exceeds the advertised size")
+            digest.update(chunk)
+            stream.write(chunk)
+        if size != metadata["size"] or digest.hexdigest() != metadata["sha256"]:
+            raise _CorruptDownload("PSD size or SHA256 verification failed")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+    def _fetch_artifact(self, base, directory, metadata):
+        target = _local_path(directory, "input.psd")
+        descriptor, temporary = tempfile.mkstemp(prefix=".input-", suffix=".part", dir=directory)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                # Only a quoted absolute cache path, never a server-provided URL.
+                url = base + "/gradio_api/file=" + quote(metadata["path"], safe="")
+                with self._http.stream("GET", url) as response:
+                    if response.status_code == 404:
+                        return None
+                    self._write_verified(response, stream, metadata)
+            _request_directory(directory.parent, directory.name)
+            os.replace(temporary, target)
+            return target
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+
+    def download(self, request_id, output_dir):
+        request_id = _request_id(request_id)
+        directory = _request_directory(output_dir, request_id)
+        self._load_receipt(request_id, directory)
+        metadata = self._completed_metadata(request_id)
         directory = self._receipt(request_id, output_dir, metadata)
-        target = directory / "input.psd"
 
         def fetch(base):
             nonlocal metadata
-            descriptor, temporary = tempfile.mkstemp(prefix=".input-", suffix=".part", dir=directory)
-            try:
-                digest = hashlib.sha256()
-                size = 0
-                with os.fdopen(descriptor, "wb") as stream:
-                    # Only a quoted absolute cache path, never a server-provided URL.
-                    url = base + "/gradio_api/file=" + quote(metadata["path"], safe="")
-                    with self._http.stream("GET", url) as response:
-                        if response.status_code == 404:
-                            refreshed = self.snapshot(request_id)
-                            self._terminal(refreshed)
-                            if refreshed["state"] != "completed":
-                                raise RequestStateError(request_id, refreshed["state"])
-                            metadata = _psd(refreshed)
-                            # A refreshed cache path can be retried, but identity cannot change.
-                            raise _CorruptDownload("PSD cache path missing; refreshed metadata")
-                        response.raise_for_status()
-                        for chunk in response.iter_bytes():
-                            size += len(chunk)
-                            if size > metadata["size"]:
-                                raise _CorruptDownload("PSD exceeds the advertised size")
-                            digest.update(chunk)
-                            stream.write(chunk)
-                    if size != metadata["size"] or digest.hexdigest() != metadata["sha256"]:
-                        raise _CorruptDownload("PSD size or SHA256 verification failed")
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(temporary, target)
-                return target
-            finally:
-                Path(temporary).unlink(missing_ok=True)
+            target = self._fetch_artifact(base, directory, metadata)
+            if target is None:
+                metadata = self._completed_metadata(request_id)
+                # Refresh only the cache path; snapshot pins size and hash.
+                raise _CorruptDownload("PSD cache path missing; refreshed metadata")
+            return target
 
         return self._retry(fetch)
 
@@ -334,16 +384,22 @@ def main(argv=None):
             command.add_argument("--seed", type=int, default=42)
             command.add_argument("--steps", type=int, default=30)
             command.add_argument("--tblr-split", action="store_true")
+            command.add_argument(
+                "--no-background-cleanup", dest="clean_background", action="store_false",
+                help="Keep model alpha in the PSD; raw PNGs are always retained.")
     args = parser.parse_args(argv)
     request_id = args.request_id if args.command == "recover" else None
     try:
         _positive(args.wait_timeout, "wait timeout")
+        output = _cli_output(args.output)
         with SeeThroughClient(args.url, args.backup, args.timeout, args.attempts) as client:
             if args.command == "run":
-                request_id = client.start(args.image, args.output, args.resolution, args.seed, args.steps, args.tblr_split)
+                request_id = client.start(
+                    args.image, output, args.resolution, args.seed, args.steps,
+                    args.tblr_split, args.clean_background)
                 print(f"Saved request ID: {request_id}", flush=True)
             client.wait(request_id, timeout=args.wait_timeout)
-            print(client.download(request_id, args.output))
+            print(client.download(request_id, output))
         return 0
     except (SeeThroughError, httpx.HTTPError, OSError, ValueError) as exc:
         if isinstance(exc, SubmissionUncertain):

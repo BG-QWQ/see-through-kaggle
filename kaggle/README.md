@@ -9,6 +9,8 @@
 3. 默认 `RUN_BATCH=False`、`ENABLE_WEBUI=True`，Run All 会在 Cell 1–4 安装、检查依赖后跳过 Cell 5–7，直接在 Cell 8 创建公网链接，Cell 9 保活。只做批处理时设 `RUN_BATCH=True`、`ENABLE_WEBUI=False`，运行 Cell 1–7。两者都开启时，必须等所有批处理及校验、打包结束才会出现 Web 链接；不要同时跑批处理与 Web UI。依赖安装到 `ENV_DIR` 独立 venv，不修改基础 kernel，也不需要重启 kernel。
 4. CLI 提交：修改 [`kernel-metadata.json`](kernel-metadata.json) 的 `<username>`，在本目录运行 `kaggle kernels push -p .`。挂载 Dataset 时也要配置 `dataset_sources`。CLI 用 `machine_shape: "NvidiaTeslaT4"`；网页导入使用 notebook 的 `metadata.kaggle.accelerator: "nvidiaTeslaT4"`。两种路径都需确认实际分配了两张 T4。
 
+开发修复先推送 `dev` 并验证，再通过指向 `main` 的 PR 交由维护者决定；不自动合并。测试新版时可在 Cell 2 设置 `REPO_BRANCH = 'dev'`。这不会热更新已有服务：请等待当前请求结束后再更新／重启，不要为了测试中断正在运行的任务。
+
 ### 配置入口
 
 | 变量 | 含义 |
@@ -52,7 +54,8 @@ Web 父进程仅负责队列、结果缓存与轻量监督；每个请求启动�
 ### 断连后的结果找回
 
 - Run 在开始长推理前创建请求 ID，显示在 `Request ID / recovery ID`，并写入当前 URL 的 `#request=...`。同一 URL 重新打开时会查询该请求；切换到另一公网域名时，复制 ID 到输入框后点 `Check status / retrieve saved result`。这个操作只读状态／提取结果，**不会重新提交推理**。计算中显示真实阶段与步数，需要稍后再次检查。
-- 使用 Gradio API 时，先调用 `create_request` 获取 ID，再将 ID 作为 `inference` 的第一个参数；每次新推理使用新 ID。同一 ID 不能重复开始；`recover_request` 只读取既有请求，不是重试接口。
+- 恢复输入框接受 ID 周围的空格、制表符和换行；不完整 ID 或误粘贴完整 URL 会显示具体英文提示，不再把输入问题作为后端异常。ID 本身仍是 32 个小写十六进制字符，`request_snapshot` 和存储层继续严格校验。网页原生 `queue=False` 找回使用有限 HTTP 请求；不能将所有备用入口报错都归因于 SSE。
+- 使用 Gradio API 时，先调用 `create_request` 获取 ID，再以 `inference(request_id, image, resolution, seed, tblr_split, steps, clean_background)` 提交；最后一项默认 True。每次新推理使用新 ID，同一 ID 不能重复开始；`recover_request` 只读取既有请求，不是重试接口。
 - 完成的 PSD 与 gallery 先移入 `WORK_DIR/see-through-jobs/<ID>/artifacts`，原子提交完成回执后才清理临时目录和交付网页。原图与中间文件不进入这份结果存储；Gradio 展示缓存仍按小时清理，找回操作可从独立存储重新建立缓存。保留范围受 Kaggle session、磁盘和保存方式约束；Save & Run All 保存的版本可能保留这些工作目录输出，并非永久存储或自动删除保证。
 - 最终结果落盘交接已经开始时，取消会等待该次文件交接结束，再传播原取消异常；重复取消不会提前清理源目录。交接成功的回执不会被后续取消覆盖，磁盘失败则保留真实错误，不会伪报完成。这不改变模型推理阶段的取消行为。
 - 重启 app 后，同一工作目录内的已完成结果仍可按 ID 读取；旧实例的运行中记录只会提示无法确认，不会自动续算。显式取消、请求超时、服务器退出或平台回收仍会终止计算。`Cancel this page's request` 仅取消当前页面提交的事件，不是重开页面后对历史任务的跨会话取消。
@@ -72,6 +75,8 @@ uv run --no-project --python python3.12 --with httpx==0.28.1 \
   --backup "$BACKUP_URL" --resolution 1024 --steps 30 --output workspace/client-results
 ```
 
+Web 与客户端默认开启选择性背景清理。需要保留模型原始 alpha 时，在页面取消勾选 `Clean background leakage in PSD layers`，或给 CLI 的 `run` 添加 `--no-background-cleanup`；库调用使用 `start(..., clean_background=False)`。两种设置都保留原始分层 PNG，详见下方画质边界。
+
 请求 ID 会在推理提交前保存到 `workspace/client-results/<ID>/request.json`。已生成 ID 后，连接中断或提示提交结果不确定时，**不要再次运行 `run`**，使用同一 ID 找回：
 
 ```bash
@@ -85,6 +90,7 @@ uv run --no-project --python python3.12 --with httpx==0.28.1 \
 - 状态查询与下载可轮换到显式配置的备用入口，两者必须指向同一个仍存活的服务。也可直接将备用地址作为 `recover` 的第一个参数；全程不需要 SSE。`--wait-timeout` 默认 7200 秒，只限制客户端轮询等待，不取消后端推理；单次网络操作仍有独立超时。
 - PSD 下载先写临时文件，校验服务端报告的大小和 SHA256 后才原子替换 `<ID>/input.psd`。失败不覆盖原有完成文件；不完整或损坏的传输不会伪报成功。同一 ID 的 PSD 大小／哈希若改变则拒绝接受，允许重新建立相同内容的展示缓存。
 - 回执包含服务地址和请求 ID，按私有文件保存；默认输出在被 Git 忽略的 `workspace/`。不要公开或提交这些文件。服务关闭、工作目录丢失或两条隧道均不可达时，重试不能恢复已经不存在的结果。
+- CLI 的 `--output` 必须解析到当前工作目录内，不能通过 `..` 或目录符号链接写到外部；库调用者仍可显式选择自己的输出根目录。请求子目录、回执及 PSD 符号链接会被拒绝，验证发生在读写边界。
 
 
 
@@ -108,7 +114,34 @@ WEB_RESOLUTION = 2048
 STEPS = 30
 ```
 
-10 steps 只适合链路冒烟，不能据其结果判断高分辨率质量；减少 steps 主要缩短耗时，不能保证解决峰值显存不足。当前 worker 在 LayerDiff 与 Marigold 之间释放管线，每次请求结束后退出。新隔离服务两次 2048 / 30 steps 均成功，约 65 分钟／次，PSD 与修复前成功结果逐字节相同；2560 仍发生真实 CUDA OOM，随后新 worker 的 1536 请求成功。旧长驻服务连续请求曾因宿主空闲堆滞留而 OOM kill，且 CUDA OOM 后同进程降分辨率未恢复；不要混用两版结论。方法、原始数据与边界见[推理验证记录](VALIDATION.md)。Notebook 默认上限已调整为 2048，但逐请求隔离不是单次峰值或长期稳定保证，不要同时启动双 worker 批处理。
+10 steps 只适合链路冒烟，不能据其结果判断高分辨率质量；减少 steps 主要缩短耗时，不能保证解决峰值显存不足。当前 worker 在 LayerDiff 与 Marigold 之间释放管线，每次请求结束后退出。请求隔离切换时的历史验收中，两次 2048 / 30 steps 均成功，约 65 分钟／次，当时 PSD 与切换前结果逐字节相同（不涵盖后续分层排序修复）；2560 仍发生真实 CUDA OOM，随后新 worker 的 1536 请求成功。旧长驻服务连续请求曾因宿主空闲堆滞留而 OOM kill，且 CUDA OOM 后同进程降分辨率未恢复；不要混用两版结论。方法、原始数据与边界见[推理验证记录](VALIDATION.md)。Notebook 默认上限已调整为 2048，但逐请求隔离不是单次峰值或长期稳定保证，不要同时启动双 worker 批处理。
+
+### 左右拆分与画质边界
+
+左右拆分属于模型输出之后的连通域后处理。拆分子层继承原层深度排序，并保留相同深度下的原层位置；额外孤岛及淡 alpha 不再因仅保留两大区域、掩码膨胀或再次裁切而丢失／重复。相连的部位不能由连通域可靠拆开，仍保留整层。PSD 写出时，眼部子层固定按眼白 → 虹膜 → 睫毛 → 眉毛的后到前顺序排列，不能让独立深度中位数或相同深度的插入顺序把眼白放到虹膜上；非眼部层的排序位置、原始像素和数值深度不变。
+
+**2048 推理完成不代表画质合格。** 原始 RGBA 层中已经存在的背景污染、错误补全或语义分层错误，不能由左右拆分、文件校验或请求隔离修复。分辨率／精度的归因需要同一原图、检查点、seed、steps 与 depth 设置对照；条件应以请求回执和 PSD 实际尺寸核对，不凭手动文件名判断。不根据“没有 OOM”宣称画质正常，也不在后台偷偷降低分辨率。
+
+这些修复只作用于新生成／重新导出的 PSD。找回旧请求只读取当时的产物，不会重算、改变已提交文件的 SHA256，或因更新代码／刷新页面自动修复旧 PSD；需要修正旧结果时应另存副本。左右拆分与眼层排序修复会有意改变新 PSD 的图层结构或文件哈希，不再以旧错误文件的逐字节一致作为验收标准。
+
+### PSD 透明度只应用一次
+
+RGBA 像素已包含 alpha。当前固定版本的 `psd-tools` 导入 RGBA 时还会自动创建同值图层蒙版；同时启用会把半透明度乘两次，例如 alpha 80 被合成为约 25。共享 PSD 写出器移除这份自动蒙版，保留像素透明度、RGB、坐标、顺序和深度数据；灰度深度 PSD 不受影响。
+
+验收必须检查**实际合成后的 alpha**，不能只读取 `layer.topil()` 或比较原始图层 PNG；这些读取可能不包含单独的图层蒙版。旧 PSD 与旧请求不会自动改变，需要从原始层重新导出到另存副本。这个修复保留模型输出的通道 alpha，不把它视为真实抠图结果，也不会补出模型漏掉的部位、纠正生成纹理或保证消除所有亮边。
+
+### 选择性背景清理
+
+Web 默认开启 `Clean background leakage in PSD layers`。不替换生成模型，不按原图轮廓裁掉全部分层，也不以白色作为透明色：
+
+- 优先用输入自带 alpha；全不透明输入使用仓库已有的 ISNet 前景分类器作为选择依据。固定使用 [`skytnt/anime-seg` 的 checkpoint revision](https://huggingface.co/skytnt/anime-seg/tree/493cb60893f47441b26ec4fb9a306bce9e342982)，下载后校验 SHA256，以 `weights_only=True` 严格加载目标网络。
+- 仅当某层至少 1% 的 alpha 总量落在原图推断的高置信背景中，才独立分类该层。原图蒙版只用于挑选问题层，**不直接乘到生成层上**，避免直接删除遮挡补全。开启开关不保证有图层被选中；位于人物轮廓内部的错误内容可能不触发该门控。
+- 被选中的层只允许降低 alpha；独立分类概率 ≥0.5 的像素保留原 alpha。RGB、保留像素的画布坐标及原深度排序不因清理改变；标准 PSD 导出仍可能收紧该层 bbox。若建议删除整层，则保留原层并在完成提示中报告不确定结果。
+- 分类器在 CPU / fp32 运行，准备阶段在重新设定推理 seed 之前完成，后处理时按需重新加载。增加 CPU、主机内存和下载开销，不借用第二张 T4，也不保证降低单次 CUDA 峰值。
+- Gallery 中 `PSD:` 是最终实际写入 PSD 的逐层预览；`Raw:` 是未清理的原始生成 PNG 字节副本。PSD、两组图片及清理报告一同持久化，找回请求不会再次推理或重新清理。
+
+分类概率不是物理 alpha 真值。ISNet 只区分前景／背景，不识别衣物、颈部等语义；即使强制分类，也可能保留人物轮廓内的错误补全。这是背景泄漏修正，不是像素级抠图、细发丝修复或语义重建保证；被选中的白色／半透明小部件仍有误判风险，生成模型本身的错误补全与纹理也可能保留。需要核对时对照 `Raw:`，或关闭清理。**提高到 2048 或改用 fp32 本身不能保证解决这些质量问题。** 现有请求的文件与 SHA256 不会因升级自动改变。
+
 
 ## 文件归属与冲突面
 
@@ -121,14 +154,20 @@ STEPS = 30
 - [`inference/scripts/inference_worker.py`](../inference/scripts/inference_worker.py)：每请求独立解释器入口，复用现有推理 API 并输出 PSD/gallery。
 - [`inference/scripts/inference_jobs.py`](../inference/scripts/inference_jobs.py)：无模型依赖的请求回执、状态转换与完成结果存储，不重试推理。
 - [`inference/scripts/client_gradio.py`](../inference/scripts/client_gradio.py)：带有界安全重试、请求 ID 恢复和 PSD 大小／SHA256 校验的独立 Python 客户端；不重试推理。
+- [`common/utils/part_split.py`](../common/utils/part_split.py)：无模型依赖的连通域拆分、局部坐标与 alpha 所有权处理；由原 PSD 后处理入口调用。
+- [`common/utils/background_cleanup.py`](../common/utils/background_cleanup.py)：选择性 CPU 前景分类与仅降低 alpha 的后处理；不修改原始生成 PNG。
 
-上游推理修改集中在 [`inference_psd_quantized.py`](../inference/scripts/inference_psd_quantized.py) 的 dtype／混合精度边界与可选进度回调，以及 [`common/modules/layerdiffuse/diffusers_kdiffusion_sdxl.py`](../common/modules/layerdiffuse/diffusers_kdiffusion_sdxl.py)、[`common/modules/marigold/marigold_depth_pipeline.py`](../common/modules/marigold/marigold_depth_pipeline.py) 的采样步观察回调；[`inference_psd_blockswap.py`](../inference/scripts/inference_psd_blockswap.py) 的对应入口同步接受可选回调。回调只传 CPU 整数，不读取张量或主动同步 CUDA；未提供回调时维持原调用方式。默认 `bf16` 不变；已有 blockswap 调用不提供 dtype 字段时仍沿用 bf16。没有修改 `inference_psd.py` 或 annotators。
+上游推理修改集中在 [`inference_psd_quantized.py`](../inference/scripts/inference_psd_quantized.py) 的 dtype／混合精度边界与可选进度回调，以及 [`common/modules/layerdiffuse/diffusers_kdiffusion_sdxl.py`](../common/modules/layerdiffuse/diffusers_kdiffusion_sdxl.py)、[`common/modules/marigold/marigold_depth_pipeline.py`](../common/modules/marigold/marigold_depth_pipeline.py) 的采样步观察回调；[`inference_psd_blockswap.py`](../inference/scripts/inference_psd_blockswap.py) 的对应入口同步接受可选回调。回调只传 CPU 整数，不读取张量或主动同步 CUDA；未提供回调时维持原调用方式。默认 `bf16` 不变；已有 blockswap 调用不提供 dtype 字段时仍沿用 bf16。`common/utils/inference_utils.py` 接受可选背景清理与实际 PSD 预览；原离线调用不传清理器时仍保留原 alpha。前景分类复用已有 annotator 网络与预处理，仅将其不相关的 refinenet 工具导入延后。没有修改 `inference_psd.py`。
+
+[`common/utils/io_utils.py`](../common/utils/io_utils.py) 的共享 PSD 写出器还负责避免 RGBA alpha 被自动图层蒙版重复应用；颜色与深度两种导出入口均沿用原签名。
 
 **混合精度边界不能省略**：LayerDiff 已在 VAE 编码后把 conditioning 转回 UNet dtype；当前 Marigold 原实现没有这样做。fp32 VAE conditioning 与 fp16 latent 拼接会提升到 fp32，导致 fp16 UNet 报 dtype mismatch。本集成在同一推理文件内用 `_MixedDtypeMarigoldPipeline.single_infer()` 做一次入口转换；bf16/同 dtype 仍使用原类。此边界已通过 CPU 真实小型模型验证，以及 Kaggle T4×2 完整分层、深度与 PSD 导出验收。
 
 **加载时也要选择 dtype**：T4×2 共享主机内存，不能让两个 worker 各自先构建完整 fp32 UNet/文本编码器再转 fp16。`_load_dtype_kwargs()` 在非 bf16 模式下按组件直接加载目标 dtype；VAE 从加载到推理均保留 fp32，不经过 fp16 舍入。默认 bf16 仍不向加载器传 dtype 参数，保留原加载路径。本地真实 checkpoint 冒烟已验证 fp32 VAE 权重逐项一致。
 
-2026-10-26 的 Kaggle 双 worker 实测还发现：group offload 会耗尽共享 30 GiB 主机内存并触发 OS OOM kill；关闭后，1280 解码需要 expandable segments 避免 CUDA 分配碎片。因此 notebook 批处理默认 `BATCH_GROUP_OFFLOAD=False`，并将 `CUDA_ALLOCATOR_CONF` 传入子进程；PyTorch 2.11+ 使用新环境变量名，旧版本使用兼容名称。Web 每次请求在独立进程中使用分阶段 group offload，不改变推理数学、精度放置、seed 位置、采样、attention 或 PSD alpha 算法。
+**UNet 先安装卸载 hooks**：非量化分组卸载路径在 CPU 确定 UNet dtype，并直接安装 hooks，不先把整套 UNet 移入 CUDA；VAE 和文本编码器保留原来已验证的 CUDA 初始化，兼容透明 VAE 的直接子模块调用。LayerDiff 和 Marigold 均不要求完整 UNet 在卸载生效前驻留 GPU。修正启动峰值不保证 fp32 采样／解码能放入单张 T4，也不代表 fp32 能消除语义分层错误。
+
+2026-10-26 的 Kaggle 双 worker 实测还发现：group offload 会耗尽共享 30 GiB 主机内存并触发 OS OOM kill；关闭后，1280 解码需要 expandable segments 避免 CUDA 分配碎片。因此 notebook 批处理默认 `BATCH_GROUP_OFFLOAD=False`，并将 `CUDA_ALLOCATOR_CONF` 传入子进程；PyTorch 2.11+ 使用新环境变量名，旧版本使用兼容名称。Web 每次请求在独立进程中使用分阶段 group offload；进程隔离本身不改变模型推理数学、精度放置、seed、采样或 attention。PSD 左右拆分的独立修复与限制见上节。
 
 同步上游：
 
@@ -147,7 +186,7 @@ STEPS = 30
 - [ ] LayerDiff／Marigold 的 scheduler loop 或 blockswap override 是否改变？进度必须在真实 step 完成后发出，保留可选 `step_callback` 接口；worker 结构化消息必须与未换行的原生 stderr 进度条正确分帧，不能退回静态三阶段百分比。
 - [ ] 保留非 bf16 模式的按组件 dtype 加载；不要把 pipeline 整体先转 fp16 再把 VAE 转回 fp32，这会丢失 VAE 权重精度，也不能降低首次 fp32 加载的共享内存峰值。
 - [ ] [官方 Space app.py](https://huggingface.co/spaces/24yearsold/see-through-demo/blob/main/app.py) 是否有值得复用的 UI 改进？[Space README](https://huggingface.co/spaces/24yearsold/see-through-demo/blob/main/README.md) 的 `sdk_version` 是否改变？同步 `requirements-kaggle.txt` 的 Gradio pin；当前为 `6.12.0`。
-- [ ] 根 `requirements.txt` 的 transformers / diffusers / accelerate 等 pin 是否更新？同步精简依赖，避免引入 Qt、annotators 或训练包。
+- [ ] 根 `requirements.txt` 的 transformers / diffusers / accelerate 等 pin 是否更新？同步精简依赖，避免引入 Qt、训练包或未使用的 annotator 依赖；背景清理只复用已列出的纯网络／预处理源码。
 - [ ] 对上列推理文件和三个 Web／worker 文件运行 `python -m py_compile`，在装好精简依赖后实际运行推理 CLI `--help` 和本地 Gradio 页面。
 - [ ] 运行 `python -m unittest discover -s inference/tests -v` 检查 OS 进程生命周期；它不需要模型依赖，不替代真实 GPU 推理或公网验收。
 - [ ] 设 `RUN_BATCH=True`、`ENABLE_WEBUI=False` 后，在 Kaggle 重新运行 Cell 1–7；Cell 6 验收每图 PSD 分层、stats dtype/显存/耗时、非透明/非黑分解图；Cell 7 验收归档包含每张图的 PSD。正常日志应有 `LayerDiff3D done`、`Marigold done`、`PSD assembly done`。
