@@ -124,12 +124,18 @@ STEPS = 30
 
 这些修复只作用于新生成／重新导出的 PSD。找回旧请求只读取当时的产物，不会重算、改变已提交文件的 SHA256，或因更新代码／刷新页面自动修复旧 PSD；需要修正旧结果时应另存副本。左右拆分与眼层排序修复会有意改变新 PSD 的图层结构或文件哈希，不再以旧错误文件的逐字节一致作为验收标准。
 
+### PSD 透明度只应用一次
+
+RGBA 像素已包含 alpha。当前固定版本的 `psd-tools` 导入 RGBA 时还会自动创建同值图层蒙版；同时启用会把半透明度乘两次，例如 alpha 80 被合成为约 25。共享 PSD 写出器移除这份自动蒙版，保留像素透明度、RGB、坐标、顺序和深度数据；灰度深度 PSD 不受影响。
+
+验收必须检查**实际合成后的 alpha**，不能只读取 `layer.topil()` 或比较原始图层 PNG；这些读取可能不包含单独的图层蒙版。旧 PSD 与旧请求不会自动改变，需要从原始层重新导出到另存副本。这个修复恢复原有透明度，不会补出模型漏掉的部位、纠正生成纹理或保证消除所有亮边。
+
 ### 选择性背景清理
 
 Web 默认开启 `Clean background leakage in PSD layers`。不替换生成模型，不按原图轮廓裁掉全部分层，也不以白色作为透明色：
 
 - 优先用输入自带 alpha；全不透明输入使用仓库已有的 ISNet 前景分类器作为选择依据。固定使用 [`skytnt/anime-seg` 的 checkpoint revision](https://huggingface.co/skytnt/anime-seg/tree/493cb60893f47441b26ec4fb9a306bce9e342982)，下载后校验 SHA256，以 `weights_only=True` 严格加载目标网络。
-- 仅当某层至少 1% 的 alpha 总量落在原图推断的高置信背景中，才独立分类该层。原图蒙版只用于挑选问题层，**不直接乘到生成层上**，避免直接删除遮挡补全。
+- 仅当某层至少 1% 的 alpha 总量落在原图推断的高置信背景中，才独立分类该层。原图蒙版只用于挑选问题层，**不直接乘到生成层上**，避免直接删除遮挡补全。开启开关不保证有图层被选中；位于人物轮廓内部的错误内容可能不触发该门控。
 - 被选中的层只允许降低 alpha；独立分类概率 ≥0.5 的像素保留原 alpha。RGB、保留像素的画布坐标及原深度排序不因清理改变；标准 PSD 导出仍可能收紧该层 bbox。若建议删除整层，则保留原层并在完成提示中报告不确定结果。
 - 分类器在 CPU / fp32 运行，准备阶段在重新设定推理 seed 之前完成，后处理时按需重新加载。增加 CPU、主机内存和下载开销，不借用第二张 T4，也不保证降低单次 CUDA 峰值。
 - Gallery 中 `PSD:` 是最终实际写入 PSD 的逐层预览；`Raw:` 是未清理的原始生成 PNG 字节副本。PSD、两组图片及清理报告一同持久化，找回请求不会再次推理或重新清理。
@@ -152,6 +158,8 @@ Web 默认开启 `Clean background leakage in PSD layers`。不替换生成模�
 - [`common/utils/background_cleanup.py`](../common/utils/background_cleanup.py)：选择性 CPU 前景分类与仅降低 alpha 的后处理；不修改原始生成 PNG。
 
 上游推理修改集中在 [`inference_psd_quantized.py`](../inference/scripts/inference_psd_quantized.py) 的 dtype／混合精度边界与可选进度回调，以及 [`common/modules/layerdiffuse/diffusers_kdiffusion_sdxl.py`](../common/modules/layerdiffuse/diffusers_kdiffusion_sdxl.py)、[`common/modules/marigold/marigold_depth_pipeline.py`](../common/modules/marigold/marigold_depth_pipeline.py) 的采样步观察回调；[`inference_psd_blockswap.py`](../inference/scripts/inference_psd_blockswap.py) 的对应入口同步接受可选回调。回调只传 CPU 整数，不读取张量或主动同步 CUDA；未提供回调时维持原调用方式。默认 `bf16` 不变；已有 blockswap 调用不提供 dtype 字段时仍沿用 bf16。`common/utils/inference_utils.py` 接受可选背景清理与实际 PSD 预览；原离线调用不传清理器时仍保留原 alpha。前景分类复用已有 annotator 网络与预处理，仅将其不相关的 refinenet 工具导入延后。没有修改 `inference_psd.py`。
+
+[`common/utils/io_utils.py`](../common/utils/io_utils.py) 的共享 PSD 写出器还负责避免 RGBA alpha 被自动图层蒙版重复应用；颜色与深度两种导出入口均沿用原签名。
 
 **混合精度边界不能省略**：LayerDiff 已在 VAE 编码后把 conditioning 转回 UNet dtype；当前 Marigold 原实现没有这样做。fp32 VAE conditioning 与 fp16 latent 拼接会提升到 fp32，导致 fp16 UNet 报 dtype mismatch。本集成在同一推理文件内用 `_MixedDtypeMarigoldPipeline.single_infer()` 做一次入口转换；bf16/同 dtype 仍使用原类。此边界已通过 CPU 真实小型模型验证，以及 Kaggle T4×2 完整分层、深度与 PSD 导出验收。
 
