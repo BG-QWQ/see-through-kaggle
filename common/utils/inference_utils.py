@@ -374,15 +374,43 @@ def save_part(tag, saved, part_dict, crop=True, save_part_info=False, save_to_di
 
 
 
+def _split_psd_parts(part_dict_list, tblr_split):
+    tag2pinfo = {}
+    for pinfo in part_dict_list:
+        tag = pinfo['tag']
+        if tblr_split and tag == 'eyes':
+            tag2pinfo.update(eyes_split(pinfo))
+        else:
+            tag2pinfo[tag] = pinfo
+    if not tblr_split:
+        return tag2pinfo
+    for tag in ('handwear', 'eyewhite', 'irides', 'eyelash', 'eyebrow', 'ears'):
+        tag_lr_split(tag, tag2pinfo)
+    if 'hair' in tag2pinfo:
+        parts = cluster_inpaint_part(**tag2pinfo.pop('hair'))
+        parts.sort(key=lambda part: part['depth_median'])
+        tag2pinfo['hairf'] = parts[0]
+        tag2pinfo['hairb'] = parts[1]
+    return tag2pinfo
+
+
+def _apply_face_depth_order(tag2pinfo):
+    if 'face' not in tag2pinfo:
+        return
+    face_depth = tag2pinfo['face']['depth_median']
+    for tag in ('nose', 'mouth', 'eyes'):
+        if tag in tag2pinfo and tag2pinfo[tag]['depth_median'] > face_depth:
+            tag2pinfo[tag]['depth_median'] = face_depth - 0.001
+    for tag in ('earr', 'earl', 'ears'):
+        if tag in tag2pinfo:
+            tag2pinfo[tag]['depth_median'] = face_depth + 0.001
+
+
 def further_extr(srcd: str, rotate=True, save_to_psd=False, tblr_split=True,
                  background_cleanup=None, preview_dir=None):
-
-
     saved = osp.join(srcd, 'optimized')
-    # infos = json2dict(osp.join(srcd, 'info.json'))
     os.makedirs(saved, exist_ok=True)
-
-    fullpage, infos, part_dict_list = load_parts(srcd, rotate=rotate)
+    fullpage, _, part_dict_list = load_parts(srcd, rotate=rotate)
     if background_cleanup is not None:
         # Alpha cleanup must not move a part to a different depth rank.
         for part in part_dict_list:
@@ -391,82 +419,22 @@ def further_extr(srcd: str, rotate=True, save_to_psd=False, tblr_split=True,
                 part['depth_median'] = np.median(part['depth'][original_mask])
         background_cleanup.refine_parts(part_dict_list, fullpage.shape[:2])
 
-    # optim_depth(part_dict_list, fullpage)
-
-    tag2pinfo = {}
-    for pinfo in part_dict_list:
-        tag = pinfo['tag']
-        if tblr_split and tag == 'eyes':
-            tag2pinfo.update(eyes_split(pinfo))
-        else:
-            tag2pinfo[tag] = pinfo
-
-
-    if tblr_split:
-        tag_lr_split('handwear', tag2pinfo)
-
-        eyetags_v3 = ['eyewhite', 'irides', 'eyelash', 'eyebrow']
-        for tag in eyetags_v3:
-            tag_lr_split(tag, tag2pinfo)
-
-        tag_lr_split('ears', tag2pinfo)
-
-    # if 'headwear' in tag2pinfo:
-    #     part_info = tag2pinfo.pop('headwear')
-    #     tag2pinfo['hair']['img'] = img_alpha_blending([tag2pinfo['hair'], part_info], xyxy=tag2pinfo['hair']['xyxy'], premultiplied=False)
-    # if 'headwear' in tag2pinfo:
-    #     part_info = tag2pinfo.pop('headwear')
-    #     tag2pinfo['hair']['img'] = img_alpha_blending([tag2pinfo['hair'], part_info], xyxy=tag2pinfo['hair']['xyxy'], premultiplied=False)
-
-    # if 'footwear' in tag2pinfo:
-    #     part_info = tag2pinfo.pop('footwear')
-    #     tag2pinfo['legwear']['img'] = img_alpha_blending([tag2pinfo['legwear'], part_info], xyxy=tag2pinfo['legwear']['xyxy'], premultiplied=False)
-
-        if 'hair' in tag2pinfo:
-            part_info = tag2pinfo.pop('hair')
-            parts = cluster_inpaint_part(**part_info)
-            parts.sort(key=lambda x: x['depth_median'])
-            tag2pinfo['hairf'] = parts[0]
-            tag2pinfo['hairb'] = parts[1]
-
-    # if 'footwear' in tag2pinfo:
-    #     tag2pinfo.pop('footwear')
-
-    if 'nose' in tag2pinfo:
-        xyxy = tag2pinfo['nose']['xyxy']
-        tag2pinfo['nose']['img'][..., :3] = fullpage[xyxy[1]: xyxy[3], xyxy[0]: xyxy[2], :3]
-
-    if 'mouth' in tag2pinfo:
-        xyxy = tag2pinfo['mouth']['xyxy']
-        tag2pinfo['mouth']['img'][..., :3] = fullpage[xyxy[1]: xyxy[3], xyxy[0]: xyxy[2], :3]
+    tag2pinfo = _split_psd_parts(part_dict_list, tblr_split)
+    for tag in ('nose', 'mouth'):
+        if tag in tag2pinfo:
+            xyxy = tag2pinfo[tag]['xyxy']
+            tag2pinfo[tag]['img'][..., :3] = fullpage[xyxy[1]:xyxy[3], xyxy[0]:xyxy[2], :3]
 
     part_dict_list = []
     save_dir = osp.dirname(saved)
     psd_savep = osp.join(osp.dirname(save_dir), osp.basename(save_dir) + '.psd')
-
-    for t in tag2pinfo:
-        if t not in tag2pinfo:
-            print(f'{t} is not valid')
-            continue
-        part_dict = tag2pinfo[t]
-        part_dict = save_part(t, saved, part_dict, save_to_disk=not save_to_psd)
+    for tag, part_dict in tag2pinfo.items():
+        part_dict = save_part(tag, saved, part_dict, save_to_disk=not save_to_psd)
         if save_to_psd:
             part_dict_list.append(part_dict)
-
-    if 'face' in tag2pinfo:
-        for t in ['nose', 'mouth', 'eyes']:
-            if t in tag2pinfo:
-                if tag2pinfo[t]['depth_median'] > tag2pinfo['face']['depth_median']:
-                    tag2pinfo[t]['depth_median'] = tag2pinfo['face']['depth_median'] - 0.001
-        for t in ['earr', 'earl', 'ears']:
-            if t in tag2pinfo:
-                tag2pinfo[t]['depth_median'] = tag2pinfo['face']['depth_median'] + 0.001
-
-    # if 'hairb' in tag2pinfo:
-    #     tag2pinfo['hairb']['depth_median'] = 1.
+    _apply_face_depth_order(tag2pinfo)
 
     frame_size = fullpage.shape[:2]
-
     previews = []
     if save_to_psd:
         previews = dump_parts_psd(

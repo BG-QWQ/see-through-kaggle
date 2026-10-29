@@ -37,7 +37,8 @@ def inference_functions(**dependencies):
     # Execute the real CPU functions without importing CUDA/model dependencies.
     source = ast.parse((UTILS / 'inference_utils.py').read_text())
     nodes = [node for node in source.body if isinstance(node, ast.FunctionDef)
-             and node.name in {'save_part', 'further_extr', 'dump_parts_psd'}]
+             and node.name in {'save_part', '_split_psd_parts', '_apply_face_depth_order',
+                               'further_extr', 'dump_parts_psd'}]
     namespace = {'np': np, 'cv2': cv2, 'os': os, 'osp': os.path,
                  'eyes_split': SPLIT.eyes_split, 'tag_lr_split': SPLIT.tag_lr_split,
                  'order_eye_layers': SPLIT.order_eye_layers}
