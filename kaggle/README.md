@@ -139,7 +139,7 @@ STEPS = 30
 
 **加载时也要选择 dtype**：T4×2 共享主机内存，不能让两个 worker 各自先构建完整 fp32 UNet/文本编码器再转 fp16。`_load_dtype_kwargs()` 在非 bf16 模式下按组件直接加载目标 dtype；VAE 从加载到推理均保留 fp32，不经过 fp16 舍入。默认 bf16 仍不向加载器传 dtype 参数，保留原加载路径。本地真实 checkpoint 冒烟已验证 fp32 VAE 权重逐项一致。
 
-**先卸载，再使用 CUDA**：非量化管线先在 CPU 确定各组件 dtype，再安装 group offload hooks；只有未启用卸载的路径才把整套管线移到 CUDA。LayerDiff 和 Marigold 均遵守此顺序，避免 fp32 在卸载尚未生效前因完整权重驻留而 OOM。修正启动峰值不保证 fp32 采样／解码能放入单张 T4，也不代表 fp32 能消除语义分层错误。
+**UNet 先安装卸载 hooks**：非量化分组卸载路径在 CPU 确定 UNet dtype，并直接安装 hooks，不先把整套 UNet 移入 CUDA；VAE 和文本编码器保留原来已验证的 CUDA 初始化，兼容透明 VAE 的直接子模块调用。LayerDiff 和 Marigold 均不要求完整 UNet 在卸载生效前驻留 GPU。修正启动峰值不保证 fp32 采样／解码能放入单张 T4，也不代表 fp32 能消除语义分层错误。
 
 2026-10-26 的 Kaggle 双 worker 实测还发现：group offload 会耗尽共享 30 GiB 主机内存并触发 OS OOM kill；关闭后，1280 解码需要 expandable segments 避免 CUDA 分配碎片。因此 notebook 批处理默认 `BATCH_GROUP_OFFLOAD=False`，并将 `CUDA_ALLOCATOR_CONF` 传入子进程；PyTorch 2.11+ 使用新环境变量名，旧版本使用兼容名称。Web 每次请求在独立进程中使用分阶段 group offload；进程隔离本身不改变模型推理数学、精度放置、seed、采样或 attention。PSD 左右拆分的独立修复与限制见上节。
 

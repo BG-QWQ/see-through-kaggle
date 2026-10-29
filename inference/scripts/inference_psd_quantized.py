@@ -78,10 +78,15 @@ def build_layerdiff_pipeline(args):
         pipeline.unet.to(dtype=compute_dtype)
         pipeline.text_encoder.to(dtype=compute_dtype)
         pipeline.text_encoder_2.to(dtype=compute_dtype)
-        # Install offload hooks on CPU; a full fp32 UNet need not fit in VRAM.
+        # Only the UNet needs to stay on CPU until offload hooks are installed.
         if args.cpu_offload:
             pipeline.enable_model_cpu_offload()
         elif getattr(args, 'group_offload', False):
+            # Preserve CUDA placement for the custom VAE's direct submodule calls.
+            pipeline.vae.to(device='cuda')
+            pipeline.trans_vae.to(device='cuda')
+            pipeline.text_encoder.to(device='cuda')
+            pipeline.text_encoder_2.to(device='cuda')
             pipeline.enable_group_offload('cuda', num_blocks_per_group=1)
         else:
             pipeline.to(device='cuda')
@@ -142,6 +147,8 @@ def build_marigold_pipeline(args):
         if args.cpu_offload:
             marigold_pipe.enable_model_cpu_offload()
         elif getattr(args, 'group_offload', False):
+            marigold_pipe.vae.to(device='cuda')
+            marigold_pipe.text_encoder.to(device='cuda')
             marigold_pipe.enable_group_offload('cuda', num_blocks_per_group=1)
         else:
             marigold_pipe.to(device='cuda')
