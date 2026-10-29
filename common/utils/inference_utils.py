@@ -374,7 +374,8 @@ def save_part(tag, saved, part_dict, crop=True, save_part_info=False, save_to_di
 
 
 
-def further_extr(srcd: str, rotate=True, save_to_psd=False, tblr_split=True):
+def further_extr(srcd: str, rotate=True, save_to_psd=False, tblr_split=True,
+                 background_cleanup=None, preview_dir=None):
 
 
     saved = osp.join(srcd, 'optimized')
@@ -382,6 +383,13 @@ def further_extr(srcd: str, rotate=True, save_to_psd=False, tblr_split=True):
     os.makedirs(saved, exist_ok=True)
 
     fullpage, infos, part_dict_list = load_parts(srcd, rotate=rotate)
+    if background_cleanup is not None:
+        # Alpha cleanup must not move a part to a different depth rank.
+        for part in part_dict_list:
+            if 'depth_median' not in part:
+                original_mask = part['img'][..., -1] > 10
+                part['depth_median'] = np.median(part['depth'][original_mask])
+        background_cleanup.refine_parts(part_dict_list, fullpage.shape[:2])
 
     # optim_depth(part_dict_list, fullpage)
 
@@ -459,14 +467,18 @@ def further_extr(srcd: str, rotate=True, save_to_psd=False, tblr_split=True):
 
     frame_size = fullpage.shape[:2]
 
+    previews = []
     if save_to_psd:
-        dump_parts_psd(tag2pinfo, frame_size, psd_savep, part_dict_list=part_dict_list)
+        previews = dump_parts_psd(
+            tag2pinfo, frame_size, psd_savep, part_dict_list=part_dict_list,
+            preview_dir=preview_dir)
         print(f'psd saved to {psd_savep}')
     else:
         dict2json({'parts': tag2pinfo, 'frame_size': frame_size}, osp.join(saved, 'info.json'))
+    return previews
 
 
-def dump_parts_psd(tag2pinfo, frame_size, psd_savep, part_dict_list=None):
+def dump_parts_psd(tag2pinfo, frame_size, psd_savep, part_dict_list=None, preview_dir=None):
     if part_dict_list is None:
         part_dict_list = []
         for v in tag2pinfo.values():
@@ -476,11 +488,22 @@ def dump_parts_psd(tag2pinfo, frame_size, psd_savep, part_dict_list=None):
     order_eye_layers(part_dict_list)
     save_psd(psd_savep, part_dict_list, frame_size[0], frame_size[1])
     save_psd(psd_depth_savep, part_dict_list, frame_size[0], frame_size[1], mode='L', img_key='depth')
+    previews = []
+    if preview_dir is not None:
+        os.makedirs(preview_dir, exist_ok=True)
+        height, width = frame_size
+        for index, part in enumerate(part_dict_list):
+            canvas = Image.new('RGBA', (width, height))
+            canvas.paste(Image.fromarray(part['img']), tuple(int(value) for value in part['xyxy'][:2]))
+            preview_path = osp.join(preview_dir, f'{index:03d}.png')
+            canvas.save(preview_path)
+            previews.append((preview_path, part['tag']))
     for pdict in tag2pinfo.values():
         for k in {'img', 'depth', 'mask'}:
             if k in pdict:
                 pdict.pop(k)
     dict2json({'parts': tag2pinfo, 'frame_size': frame_size}, psd_savep + '.json')
+    return previews
 
 
 def psd2partdicts(srcp):

@@ -214,12 +214,15 @@ class SeeThroughClient:
                 Path(temporary).unlink(missing_ok=True)
         return directory
 
-    def start(self, image_path, output_dir, resolution=1024, seed=42, steps=30, tblr_split=False):
+    def start(self, image_path, output_dir, resolution=1024, seed=42, steps=30,
+              tblr_split=False, clean_background=True):
         _integer(resolution, "resolution")
         _integer(seed, "seed", minimum=0)
         _integer(steps, "steps")
         if not isinstance(tblr_split, bool):
             raise ValueError("tblr_split must be boolean")
+        if not isinstance(clean_background, bool):
+            raise ValueError("clean_background must be boolean")
         image_path = Path(image_path)
 
         def upload(base):
@@ -240,7 +243,7 @@ class SeeThroughClient:
         try:
             response = self._http.post(self.base_url + "/gradio_api/call/inference", json={"data": [
                 request_id, {"path": uploaded_path, "orig_name": image_path.name, "meta": {"_type": "gradio.FileData"}},
-                resolution, seed, tblr_split, steps,
+                resolution, seed, tblr_split, steps, clean_background,
             ]})
             response.raise_for_status()
             body = response.json()
@@ -381,6 +384,9 @@ def main(argv=None):
             command.add_argument("--seed", type=int, default=42)
             command.add_argument("--steps", type=int, default=30)
             command.add_argument("--tblr-split", action="store_true")
+            command.add_argument(
+                "--no-background-cleanup", dest="clean_background", action="store_false",
+                help="Keep model alpha in the PSD; raw PNGs are always retained.")
     args = parser.parse_args(argv)
     request_id = args.request_id if args.command == "recover" else None
     try:
@@ -388,7 +394,9 @@ def main(argv=None):
         output = _cli_output(args.output)
         with SeeThroughClient(args.url, args.backup, args.timeout, args.attempts) as client:
             if args.command == "run":
-                request_id = client.start(args.image, output, args.resolution, args.seed, args.steps, args.tblr_split)
+                request_id = client.start(
+                    args.image, output, args.resolution, args.seed, args.steps,
+                    args.tblr_split, args.clean_background)
                 print(f"Saved request ID: {request_id}", flush=True)
             client.wait(request_id, timeout=args.wait_timeout)
             print(client.download(request_id, output))
